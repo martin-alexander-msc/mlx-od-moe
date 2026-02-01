@@ -16,7 +16,14 @@ This enables running 375GB models on 192GB systems by keeping only a working set
 
 ### 1. Install Dependencies
 
+**Note:** This guide uses `python` for brevity. On some systems (especially macOS), you may need to use `python3` instead.
+
+**Prerequisites:** Python 3.8+
+
+**Recommended:** Use a virtual environment:
 ```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install gguf safetensors tqdm numpy
 ```
 
@@ -52,7 +59,7 @@ python -m convert.gguf_to_od_moe \
   --num-experts 384
 ```
 
-**⚠️ Warning:** Full conversion takes ~30-45 minutes and writes ~375GB to disk.
+**⚠️ Warning (Mac Studio w/ NVMe):** Full conversion takes ~30-45 minutes and writes ~375GB to disk. Time may vary based on disk speed.
 
 ## Output Structure
 
@@ -158,9 +165,11 @@ with safe_open("experts/layer_00_expert_042.safetensors", framework="mlx") as f:
 
 ## Validation
 
-Run the test suite to verify conversion correctness:
+Run the test suite from the project root directory to verify conversion correctness:
 
 ```bash
+# From project root: /Users/yuzucchi/Projects/mlx-od-moe/
+
 # Unit tests
 pytest tests/test_gguf_parser.py -v
 pytest tests/test_base_extraction.py -v
@@ -178,7 +187,7 @@ All tests should pass on the toy model.
 
 **Cause:** Input file is not a valid GGUF format.
 
-**Solution:** Verify the file with `gguf-dump`:
+**Solution:** Verify the file with Python:
 ```bash
 python -c "import gguf; reader = gguf.GGUFReader('file.gguf'); print(reader.fields.keys())"
 ```
