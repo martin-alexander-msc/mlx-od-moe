@@ -194,49 +194,79 @@ def extract_base_model(gguf_path: Path, output_dir: Path):
 def extract_experts(gguf_path: Path, output_dir: Path, num_layers: int = 28, num_experts: int = 384):
     """
     Extract individual experts to separate safetensors files.
-    
+
     Creates: experts/layer_XX_expert_XXX.safetensors
-    
+
     Each expert contains: w1, w2, w3 for Gated MLP
     """
     print(f"Extracting {num_layers * num_experts} experts...")
-    
+
+    # Create output directory
     expert_dir = output_dir / "experts"
     expert_dir.mkdir(parents=True, exist_ok=True)
-    
-    # TODO: Actual GGUF expert extraction
-    # For now, create dummy experts for testing
-    
+
+    # Read GGUF file
+    reader = gguf.GGUFReader(str(gguf_path))
+
+    # Build tensor lookup
+    tensor_lookup = {tensor.name: tensor for tensor in reader.tensors}
+
+    # Initialize registry
     expert_registry = {}
-    
-    for layer in range(num_layers):
-        print(f"Processing layer {layer}/{num_layers}...")
-        
-        for expert in range(num_experts):
-            key = f"layer_{layer:02d}_expert_{expert:03d}"
-            
-            # Placeholder: create dummy expert weights
-            # Real implementation: extract from GGUF
-            # w1: (4096, 14336), w2: (14336, 4096), w3: (4096, 14336)
-            # Total: ~470MB per expert at fp16
-            
-            dummy_weights = np.random.randn(470 * 1024 * 1024 // 2).astype(np.float16)
-            
-            # Save as .npy for now (safetensors requires actual lib)
-            save_path = expert_dir / f"{key}.npy"
-            np.save(save_path, dummy_weights)
-            
-            expert_registry[key] = {
-                'path': str(save_path),
-                'size': save_path.stat().st_size
-            }
-    
+
+    # Extract experts with progress bar
+    total_experts = num_layers * num_experts
+    with tqdm(total=total_experts, desc="Extracting experts") as pbar:
+        for layer in range(num_layers):
+            for expert in range(num_experts):
+                # Build key
+                key = f"layer_{layer:02d}_expert_{expert:03d}"
+
+                # Get tensor names for this expert
+                w1_name = f"blk.{layer}.ffn.experts.{expert}.w1.weight"
+                w2_name = f"blk.{layer}.ffn.experts.{expert}.w2.weight"
+                w3_name = f"blk.{layer}.ffn.experts.{expert}.w3.weight"
+
+                # Extract tensors from tensor_lookup
+                expert_tensors = {}
+
+                if w1_name in tensor_lookup:
+                    expert_tensors["w1.weight"] = tensor_lookup[w1_name].data
+
+                if w2_name in tensor_lookup:
+                    expert_tensors["w2.weight"] = tensor_lookup[w2_name].data
+
+                if w3_name in tensor_lookup:
+                    expert_tensors["w3.weight"] = tensor_lookup[w3_name].data
+
+                # Save to safetensors
+                save_path = expert_dir / f"{key}.safetensors"
+                save_file(expert_tensors, save_path)
+
+                # Add to registry
+                expert_registry[key] = {
+                    "path": f"experts/{key}.safetensors",  # Relative to output_dir
+                    "size": save_path.stat().st_size,
+                    "layer": layer,
+                    "expert_id": expert,
+                    "tensors": list(expert_tensors.keys())
+                }
+
+                # Update progress
+                pbar.update(1)
+
     # Save registry
-    with open(expert_dir / "registry.json", 'w') as f:
+    registry_path = expert_dir / "registry.json"
+    with open(registry_path, 'w') as f:
         json.dump(expert_registry, f, indent=2)
-    
-    print(f"Experts extracted to {expert_dir}")
-    print(f"Registry saved: {expert_dir}/registry.json")
+
+    # Print summary
+    total_size_bytes = sum(info["size"] for info in expert_registry.values())
+    total_size_gb = total_size_bytes / (1024 ** 3)
+
+    print(f"\nExperts extracted to {expert_dir}")
+    print(f"Total size: {total_size_gb:.2f} GB")
+    print(f"Registry saved: {registry_path}")
 
 
 def convert_gguf_to_od_moe(
