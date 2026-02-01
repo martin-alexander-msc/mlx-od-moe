@@ -97,7 +97,8 @@ def train_shadow_model(
         # Add sequence dimension (we pooled during collection)
         hidden = mx.expand_dims(hidden, axis=1)
 
-        predictions = model(hidden)
+        # Get logits (not top-k indices) for training
+        logits_list = model.get_logits(hidden)
 
         total_loss = 0.0
 
@@ -112,7 +113,7 @@ def train_shadow_model(
                     target_multi_hot[batch_idx, int(expert_idx)] = 1.0
 
             # Binary cross-entropy loss
-            logits = predictions[step]
+            logits = logits_list[step]  # Shape: (batch, 384)
             probs = mx.sigmoid(logits)
 
             # Binary cross-entropy
@@ -172,17 +173,18 @@ def train_shadow_model(
     eval_targets = expert_choices[:eval_size]
 
     eval_hidden = mx.expand_dims(eval_hidden, axis=1)
-    predictions = model(eval_hidden)
+    # Get logits for evaluation
+    logits_list = model.get_logits(eval_hidden)
 
     # Compute top-k accuracies for first prediction head (t+1)
     metrics['top1_accuracy'] = compute_top_k_accuracy(
-        predictions[0], eval_targets[:, 0, :], k=1
+        logits_list[0], eval_targets[:, 0, :], k=1
     )
     metrics['top4_accuracy'] = compute_top_k_accuracy(
-        predictions[0], eval_targets[:, 0, :], k=4
+        logits_list[0], eval_targets[:, 0, :], k=4
     )
     metrics['top8_accuracy'] = compute_top_k_accuracy(
-        predictions[0], eval_targets[:, 0, :], k=8
+        logits_list[0], eval_targets[:, 0, :], k=8
     )
 
     print(f"Top-1 accuracy: {metrics['top1_accuracy']:.1%}")

@@ -44,10 +44,38 @@ class ExpertPredictor(nn.Module):
 
         # Separate prediction head for each lookahead step
         # Simplified to single linear layer for speed
-        self.prediction_heads = [
-            nn.Linear(predictor_dim, num_experts)
-            for _ in range(num_layers_ahead)
-        ]
+        # Register each head individually so MLX tracks them
+        self.head_0 = nn.Linear(predictor_dim, num_experts)
+        self.head_1 = nn.Linear(predictor_dim, num_experts)
+        self.head_2 = nn.Linear(predictor_dim, num_experts)
+        self.head_3 = nn.Linear(predictor_dim, num_experts)
+        self.prediction_heads = [self.head_0, self.head_1, self.head_2, self.head_3]
+
+    def get_logits(self, hidden_states: mx.array) -> List[mx.array]:
+        """
+        Get raw logits for training (before top-k selection).
+
+        Args:
+            hidden_states: (batch, seq_len, hidden_dim)
+
+        Returns:
+            List of 4 tensors, each (batch, num_experts) logits
+        """
+        # Pool over sequence length (mean pooling)
+        # Shape: (batch, hidden_dim)
+        pooled = mx.mean(hidden_states, axis=1)
+
+        # Encode to compressed representation
+        # Shape: (batch, predictor_dim)
+        encoded = self.encoder(pooled)
+
+        # Get logits for each lookahead step
+        logits = []
+        for head in self.prediction_heads:
+            # Shape: (batch, num_experts)
+            logits.append(head(encoded))
+
+        return logits
 
     def __call__(self, hidden_states: mx.array) -> List[mx.array]:
         """
@@ -59,22 +87,12 @@ class ExpertPredictor(nn.Module):
         Returns:
             List of 4 tensors, each (batch, top_k) of expert indices
         """
-        # Pool over sequence length (mean pooling)
-        # Shape: (batch, hidden_dim)
-        pooled = mx.mean(hidden_states, axis=1)
+        # Get logits
+        logits_list = self.get_logits(hidden_states)
 
-        # Encode to compressed representation
-        # Shape: (batch, predictor_dim)
-        encoded = self.encoder(pooled)
-
-        # Predict for each lookahead step
+        # Select top-k for each lookahead step
         predictions = []
-        for head in self.prediction_heads:
-            # Get logits over all experts
-            # Shape: (batch, num_experts)
-            logits = head(encoded)
-
-            # Select top-k experts
+        for logits in logits_list:
             # For batch size 1 (inference), just use argmax
             if logits.shape[0] == 1:
                 # Shape: (top_k,)
@@ -91,47 +109,64 @@ class ExpertPredictor(nn.Module):
         """Save model weights to safetensors file"""
         from safetensors.mlx import save_file
         from pathlib import Path
+        import mlx.core as mx
 
         path = Path(path)
         params = {}
 
-        # Encoder parameters
+        # Manually extract all parameters
+        # Encoder layers
         for i, layer in enumerate(self.encoder):
-            if isinstance(layer, nn.Linear):
-                params[f'encoder_{i}_weight'] = layer.weight
-                params[f'encoder_{i}_bias'] = layer.bias
-            elif isinstance(layer, nn.LayerNorm):
-                params[f'encoder_{i}_weight'] = layer.weight
-                params[f'encoder_{i}_bias'] = layer.bias
-
-        # Prediction head parameters
-        for head_idx, head in enumerate(self.prediction_heads):
-            params[f'head_{head_idx}_weight'] = head.weight
-            params[f'head_{head_idx}_bias'] = head.bias
-
+            if hasattr(layer, 'weight'):
+                params[f'encoder.{i}.weight'] = layer.weight
+            if hasattr(layer, 'bias'):
+                params[f'encoder.{i}.bias'] = layer.bias
+        
+        # Prediction heads
+        for i, head in enumerate(self.prediction_heads):
+            if hasattr(head, 'weight'):
+                params[f'prediction_heads.{i}.weight'] = head.weight
+            if hasattr(head, 'bias'):
+                params[f'prediction_heads.{i}.bias'] = head.bias
+        
+        # Evaluate all parameters
+        mx.eval(params)
         save_file(params, str(path))
 
     def load_weights(self, path):
         """Load model weights from safetensors file"""
         from safetensors.mlx import load_file
         from pathlib import Path
+        import mlx.core as mx
 
         path = Path(path)
         params = load_file(str(path))
-
-        # Load encoder parameters
+        
+        # Build update dict for proper parameter loading
+        update_dict = {}
+        
+        # Encoder layers
         for i, layer in enumerate(self.encoder):
-            if isinstance(layer, nn.Linear):
-                layer.weight = params[f'encoder_{i}_weight']
-                layer.bias = params[f'encoder_{i}_bias']
-            elif isinstance(layer, nn.LayerNorm):
-                layer.weight = params[f'encoder_{i}_weight']
-                layer.bias = params[f'encoder_{i}_bias']
-
-        # Load prediction head parameters
-        for head_idx, head in enumerate(self.prediction_heads):
-            head.weight = params[f'head_{head_idx}_weight']
-            head.bias = params[f'head_{head_idx}_bias']
+            layer_params = {}
+            if hasattr(layer, 'weight') and f'encoder.{i}.weight' in params:
+                layer_params['weight'] = params[f'encoder.{i}.weight']
+            if hasattr(layer, 'bias') and f'encoder.{i}.bias' in params:
+                layer_params['bias'] = params[f'encoder.{i}.bias']
+            if layer_params:
+                layer.update(layer_params)
+        
+        # Prediction heads  
+        for i, head in enumerate(self.prediction_heads):
+            head_params = {}
+            if hasattr(head, 'weight') and f'prediction_heads.{i}.weight' in params:
+                head_params['weight'] = params[f'prediction_heads.{i}.weight']
+            if hasattr(head, 'bias') and f'prediction_heads.{i}.bias' in params:
+                head_params['bias'] = params[f'prediction_heads.{i}.bias']
+            if head_params:
+                head.update(head_params)
+        
+        # Evaluate to materialize all parameters
+        mx.eval(self.parameters())
 
 
 class ShadowRunner:
