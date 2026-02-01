@@ -15,6 +15,8 @@ import argparse
 from typing import Dict
 import json
 import gguf
+from safetensors.numpy import save_file
+from tqdm import tqdm
 
 
 def parse_gguf_metadata(filepath: Path) -> Dict:
@@ -125,25 +127,67 @@ def parse_gguf_metadata(filepath: Path) -> Dict:
 def extract_base_model(gguf_path: Path, output_dir: Path):
     """
     Extract base model components (embeddings, attention, norms).
-    
+
     These are always-resident components that don't change during inference.
     """
     print("Extracting base model...")
-    
-    # TODO: Actual GGUF parsing
-    # For now, create placeholder
+
+    # Create output directory
     base_dir = output_dir / "base_model"
     base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Placeholder: would extract real tensors here
+
+    # Read GGUF file
+    reader = gguf.GGUFReader(str(gguf_path))
+
+    # Categorize tensors into 4 dicts
+    embeddings = {}
+    lm_head = {}
+    norms = {}
+    attention_layers = {}
+
+    # Iterate through tensors with progress bar
+    for tensor in tqdm(reader.tensors, desc="Reading tensors"):
+        tensor_name = tensor.name
+        tensor_data = tensor.data
+
+        # Categorize based on tensor name
+        if "token_embd" in tensor_name:
+            embeddings[tensor_name] = tensor_data
+        elif tensor_name == "output.weight":
+            lm_head[tensor_name] = tensor_data
+        elif "norm" in tensor_name and "experts" not in tensor_name:
+            norms[tensor_name] = tensor_data
+        elif "attn" in tensor_name or "ffn.gate" in tensor_name:
+            # Attention layers + router/gate (part of base model)
+            attention_layers[tensor_name] = tensor_data
+
+    # Save categorized tensors as safetensors files
+    if embeddings:
+        save_file(embeddings, base_dir / "embeddings.safetensors")
+
+    if attention_layers:
+        save_file(attention_layers, base_dir / "attention_layers.safetensors")
+
+    if norms:
+        save_file(norms, base_dir / "norms.safetensors")
+
+    if lm_head:
+        save_file(lm_head, base_dir / "lm_head.safetensors")
+
+    # Save metadata.json
     metadata = {
         'extracted': True,
-        'components': ['embeddings', 'attention_layers', 'norms', 'lm_head']
+        'components': {
+            'embeddings': len(embeddings),
+            'attention_layers': len(attention_layers),
+            'norms': len(norms),
+            'lm_head': len(lm_head)
+        }
     }
-    
+
     with open(base_dir / "metadata.json", 'w') as f:
         json.dump(metadata, f, indent=2)
-    
+
     print(f"Base model extracted to {base_dir}")
 
 
