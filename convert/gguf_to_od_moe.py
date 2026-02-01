@@ -14,34 +14,112 @@ from pathlib import Path
 import argparse
 from typing import Dict
 import json
+import gguf
 
 
 def parse_gguf_metadata(filepath: Path) -> Dict:
     """
     Parse GGUF file header and extract metadata.
-    
+
     GGUF format: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
-    
+
     Returns:
-        Metadata dict with tensor info
+        Metadata dict with tensor info including:
+        - architecture: Model architecture name
+        - num_layers: Number of transformer layers
+        - num_experts: Number of experts per layer
+        - dim: Model dimension
+        - vocab_size: Vocabulary size
+        - tensors: Dict of tensor metadata
+        - total_tensors: Total number of tensors
     """
-    with open(filepath, 'rb') as f:
-        # Check magic number
-        magic = f.read(4)
-        if magic != b'GGUF':
-            raise ValueError(f"Not a GGUF file: {filepath}")
-        
-        # Read version
-        version = struct.unpack('<I', f.read(4))[0]
-        print(f"GGUF version: {version}")
-        
-        # TODO: Parse full metadata
-        # For now, return placeholder
-        return {
-            'version': version,
-            'num_layers': 28,
-            'num_experts': 384
+    # Validate file exists
+    if not filepath.exists():
+        raise FileNotFoundError(f"File not found: {filepath}")
+
+    # Open with GGUFReader
+    try:
+        reader = gguf.GGUFReader(str(filepath))
+    except Exception as e:
+        raise ValueError(f"Not a GGUF file: {filepath}") from e
+
+    # Extract architecture metadata
+    architecture = None
+    if "general.architecture" in reader.fields:
+        arch_field = reader.fields["general.architecture"]
+        # The architecture string is in parts[-1] as bytes
+        if hasattr(arch_field.parts, '__iter__') and len(arch_field.parts) > 0:
+            arch_bytes = arch_field.parts[-1]
+            if hasattr(arch_bytes, 'tobytes'):
+                architecture = arch_bytes.tobytes().decode('utf-8')
+            elif isinstance(arch_bytes, bytes):
+                architecture = arch_bytes.decode('utf-8')
+            else:
+                architecture = str(arch_bytes)
+
+    # Extract layer count
+    num_layers = None
+    if architecture:
+        layer_key = f"{architecture}.block_count"
+        if layer_key in reader.fields:
+            # The value is in parts[-1] as numpy array
+            value = reader.fields[layer_key].parts[-1]
+            num_layers = int(value.item() if hasattr(value, 'item') else value)
+
+    # Extract model dimension
+    dim = None
+    if architecture:
+        dim_key = f"{architecture}.embedding_length"
+        if dim_key in reader.fields:
+            # The value is in parts[-1] as numpy array
+            value = reader.fields[dim_key].parts[-1]
+            dim = int(value.item() if hasattr(value, 'item') else value)
+
+    # Extract number of experts
+    num_experts = None
+    expert_key = "kimi.num_experts_per_layer"
+    if expert_key in reader.fields:
+        # The value is in parts[-1] as numpy array
+        value = reader.fields[expert_key].parts[-1]
+        num_experts = int(value.item() if hasattr(value, 'item') else value)
+
+    # Build tensor metadata dict
+    tensors = {}
+    for tensor in reader.tensors:
+        tensors[tensor.name] = {
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.tensor_type),
+            "offset": tensor.data_offset,
+            "n_elements": tensor.n_elements
         }
+
+    # Extract vocab size from token embeddings tensor
+    # Token embeddings shape in GGUF: [dim, vocab_size]
+    vocab_size = None
+    if "token_embd.weight" in tensors:
+        # GGUF stores as [dim, vocab_size], so vocab_size is shape[1]
+        vocab_size = tensors["token_embd.weight"]["shape"][1]
+
+    total_tensors = len(tensors)
+
+    # Print metadata summary
+    print(f"\nGGUF Metadata Summary:")
+    print(f"  Architecture: {architecture}")
+    print(f"  Layers: {num_layers}")
+    print(f"  Experts/layer: {num_experts}")
+    print(f"  Dimension: {dim}")
+    print(f"  Vocab size: {vocab_size}")
+    print(f"  Total tensors: {total_tensors}")
+
+    return {
+        "architecture": architecture,
+        "num_layers": num_layers,
+        "num_experts": num_experts,
+        "dim": dim,
+        "vocab_size": vocab_size,
+        "tensors": tensors,
+        "total_tensors": total_tensors
+    }
 
 
 def extract_base_model(gguf_path: Path, output_dir: Path):
