@@ -84,20 +84,24 @@ class ODMoELayer(nn.Module):
             # Fetch from expert store (fast if cached, slow if SSD read)
             expert_weights = self.expert_store.fetch(self.layer_idx, idx)
 
-            # Split flat array into w1, w2, w3 components
-            # Layout: [w1_flat, w2_flat, w3_flat]
-            w1_size = self.hidden_dim * self.expert_w1_dim
-            w2_size = self.expert_w1_dim * self.expert_w2_dim
-            w3_size = self.hidden_dim * self.expert_w3_dim
+            if isinstance(expert_weights, dict):
+                # Dict format from real expert store (safetensors files)
+                w1 = expert_weights['w1']
+                w2 = expert_weights['w2']
+                w3 = expert_weights['w3']
+            else:
+                # Flat array format (for testing)
+                w1_size = self.hidden_dim * self.expert_w1_dim
+                w2_size = self.expert_w1_dim * self.expert_w2_dim
+                w3_size = self.hidden_dim * self.expert_w3_dim
 
-            # Split and reshape
-            w1_flat = expert_weights[:w1_size]
-            w2_flat = expert_weights[w1_size:w1_size + w2_size]
-            w3_flat = expert_weights[w1_size + w2_size:w1_size + w2_size + w3_size]
+                w1_flat = expert_weights[:w1_size]
+                w2_flat = expert_weights[w1_size:w1_size + w2_size]
+                w3_flat = expert_weights[w1_size + w2_size:w1_size + w2_size + w3_size]
 
-            w1 = w1_flat.reshape(self.hidden_dim, self.expert_w1_dim)
-            w2 = w2_flat.reshape(self.expert_w1_dim, self.expert_w2_dim)
-            w3 = w3_flat.reshape(self.hidden_dim, self.expert_w3_dim)
+                w1 = w1_flat.reshape(self.hidden_dim, self.expert_w1_dim)
+                w2 = w2_flat.reshape(self.expert_w1_dim, self.expert_w2_dim)
+                w3 = w3_flat.reshape(self.hidden_dim, self.expert_w3_dim)
 
             new_experts[idx] = (w1, w2, w3)
         
@@ -134,7 +138,7 @@ class ODMoELayer(nn.Module):
         expert_mask = mx.zeros((num_tokens, self.num_experts))
         for i in range(num_tokens):
             for k in range(self.top_k):
-                expert_idx = int(top_k_indices[i, k])
+                expert_idx = top_k_indices[i, k].item()
                 expert_mask[i, expert_idx] = 1.0
 
         # Expert usage frequency (fraction of tokens routing to each expert)
@@ -145,7 +149,7 @@ class ODMoELayer(nn.Module):
 
         # Load balancing loss: dot product encourages balance
         # Scale by num_experts to normalize
-        return float(mx.sum(expert_usage * expert_prob_mass) * self.num_experts)
+        return (mx.sum(expert_usage * expert_prob_mass) * self.num_experts).item()
 
     def apply_expert(self, x: mx.array, expert_idx: int) -> mx.array:
         """
