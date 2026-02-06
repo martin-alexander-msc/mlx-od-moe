@@ -65,11 +65,21 @@ def initialize_model(
 
     # Load base weights
     print(f"Loading base weights from {base_weights}...")
-    weights = mx.load(base_weights)
-    model.load_weights(list(weights.items()))
+    try:
+        weights = mx.load(base_weights)
+        model.load_weights(list(weights.items()))
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Base weights not found: {base_weights}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load base weights from {base_weights}: {e}")
 
     # Setup OD-MoE
-    model.setup_od_moe(expert_dir, cache_size_gb=cache_size_gb)
+    try:
+        model.setup_od_moe(expert_dir, cache_size_gb=cache_size_gb)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Expert directory not found: {expert_dir}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to setup OD-MoE from {expert_dir}: {e}")
 
     # Load tokenizer
     if tokenizer_path:

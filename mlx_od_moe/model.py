@@ -3,9 +3,15 @@ Full Model - Transformer with OD-MoE layers
 
 Implements the complete inference pipeline:
 - GQA (Grouped Query Attention) with RoPE
-- KV cache for efficient autoregressive generation
+- Pre-allocated KV cache for efficient autoregressive generation
 - OD-MoE FFN layers with on-demand expert loading
 - Top-p (nucleus) sampling
+
+NOTE: This uses GQA attention. Kimi-K2.5 uses MLA (Multi-head Latent Attention)
+which compresses KV projections into a low-rank latent space for 8x KV cache
+reduction. GQA is used here as a compatible foundation that also supports
+Qwen2-MoE and Mixtral architectures. MLA can be added as an alternative
+Attention class when targeting Kimi-K2.5 specifically.
 """
 
 import mlx.core as mx
@@ -34,6 +40,8 @@ class KimiODMoEConfig:
         max_position_embeddings=262144,
         rms_norm_eps=1e-6,
         rope_theta=1000000.0,
+        eos_token_id=0,
+        shadow_lookahead=2,
     ):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -47,27 +55,142 @@ class KimiODMoEConfig:
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
         self.head_dim = hidden_size // num_attention_heads
+        self.eos_token_id = eos_token_id
+        self.shadow_lookahead = shadow_lookahead
 
 
 class KVCache:
-    """Key-Value cache for autoregressive generation."""
+    """
+    Pre-allocated KV cache for autoregressive generation.
 
-    def __init__(self):
+    Allocates buffers in chunks (default 256 tokens) and fills them via
+    slice assignment, avoiding O(T) copies on every decode step.
+    """
+
+    def __init__(self, step: int = 256):
         self.keys: Optional[mx.array] = None
         self.values: Optional[mx.array] = None
+        self._offset = 0
+        self._step = step
 
     @property
     def offset(self) -> int:
-        return self.keys.shape[2] if self.keys is not None else 0
+        return self._offset
 
     def update(self, keys: mx.array, values: mx.array):
-        if self.keys is None:
-            self.keys = keys
-            self.values = values
-        else:
-            self.keys = mx.concatenate([self.keys, keys], axis=2)
-            self.values = mx.concatenate([self.values, values], axis=2)
-        return self.keys, self.values
+        new_tokens = keys.shape[2]
+
+        if self.keys is None or (self._offset + new_tokens) > self.keys.shape[2]:
+            # Need to allocate or grow the buffer
+            B, H, _, D = keys.shape
+            n_steps = (self._step + new_tokens - 1) // self._step
+            alloc_len = n_steps * self._step
+            new_k = mx.zeros((B, H, self._offset + alloc_len, D), dtype=keys.dtype)
+            new_v = mx.zeros((B, H, self._offset + alloc_len, D), dtype=values.dtype)
+
+            if self.keys is not None:
+                # Copy existing cached data into new buffer
+                new_k[:, :, : self._offset, :] = self.keys[:, :, : self._offset, :]
+                new_v[:, :, : self._offset, :] = self.values[:, :, : self._offset, :]
+
+            self.keys = new_k
+            self.values = new_v
+
+        # Write new keys/values into the pre-allocated slot
+        self.keys[:, :, self._offset : self._offset + new_tokens, :] = keys
+        self.values[:, :, self._offset : self._offset + new_tokens, :] = values
+        self._offset += new_tokens
+
+        return self.keys[:, :, : self._offset, :], self.values[:, :, : self._offset, :]
+
+
+def _expand_kv_heads(x: mx.array, n_rep: int) -> mx.array:
+    """Expand KV heads to match query heads via zero-copy broadcast."""
+    if n_rep == 1:
+        return x
+    B, H, T, D = x.shape
+    return mx.broadcast_to(
+        x[:, :, None, :, :], (B, H, n_rep, T, D)
+    ).reshape(B, H * n_rep, T, D)
+
+
+# Cache for commonly used causal masks to avoid recomputation
+_mask_cache: dict = {}
+
+
+def _create_causal_mask(
+    query_len: int, kv_len: Optional[int] = None
+) -> Optional[mx.array]:
+    """
+    Create additive causal attention mask.
+
+    Args:
+        query_len: Number of query tokens
+        kv_len: Total KV length (query_len + cache offset). If None, equals query_len.
+
+    Returns:
+        Mask of shape (query_len, kv_len) or None if no masking needed.
+    """
+    if query_len <= 1:
+        return None
+
+    if kv_len is None:
+        kv_len = query_len
+
+    cache_key = (query_len, kv_len)
+    if cache_key in _mask_cache:
+        return _mask_cache[cache_key]
+
+    # Row indices: positions in the query (offset by kv_len - query_len)
+    q_positions = mx.arange(query_len) + (kv_len - query_len)
+    k_positions = mx.arange(kv_len)
+    mask = (q_positions[:, None] < k_positions[None, :]).astype(mx.float32) * -1e9
+
+    # Cache masks for common sizes (limit cache to avoid unbounded growth)
+    if len(_mask_cache) < 64:
+        _mask_cache[cache_key] = mask
+
+    return mask
+
+
+def _sample_top_p(logits: mx.array, p: float) -> mx.array:
+    """
+    Top-p (nucleus) sampling.
+
+    Args:
+        logits: Un-normalized logits (batch, vocab_size)
+        p: Cumulative probability threshold
+
+    Returns:
+        Sampled token IDs (batch,)
+    """
+    if p >= 1.0:
+        return mx.random.categorical(logits)
+
+    probs = mx.softmax(logits, axis=-1)
+    sorted_indices = mx.argsort(probs, axis=-1)[:, ::-1]
+    sorted_probs = mx.take_along_axis(probs, sorted_indices, axis=-1)
+
+    cumulative_probs = mx.cumsum(sorted_probs, axis=-1)
+
+    # Mask tokens beyond the cumulative threshold (keep at least one)
+    mask = (cumulative_probs - sorted_probs) >= p
+    sorted_probs = mx.where(mask, mx.zeros_like(sorted_probs), sorted_probs)
+
+    # Re-normalize
+    sorted_probs = sorted_probs / mx.sum(sorted_probs, axis=-1, keepdims=True)
+
+    # Sample: use -inf for zeroed-out tokens to avoid epsilon-induced distribution shift
+    log_probs = mx.where(
+        sorted_probs > 0,
+        mx.log(sorted_probs),
+        mx.full(sorted_probs.shape, -1e9),
+    )
+    sampled_idx = mx.random.categorical(log_probs)
+
+    # Map back to original vocabulary indices
+    next_token = mx.take_along_axis(sorted_indices, sampled_idx[:, None], axis=-1)[:, 0]
+    return next_token
 
 
 class Attention(nn.Module):
@@ -114,10 +237,9 @@ class Attention(nn.Module):
         if cache is not None:
             keys, values = cache.update(keys, values)
 
-        # GQA: expand KV heads to match query heads
-        if self.num_kv_groups > 1:
-            keys = mx.repeat(keys, self.num_kv_groups, axis=1)
-            values = mx.repeat(values, self.num_kv_groups, axis=1)
+        # GQA: expand KV heads to match query heads (zero-copy broadcast)
+        keys = _expand_kv_heads(keys, self.num_kv_groups)
+        values = _expand_kv_heads(values, self.num_kv_groups)
 
         # Scaled dot-product attention
         scores = (queries @ keys.transpose(0, 1, 3, 2)) * self.scale
@@ -159,51 +281,6 @@ class TransformerBlock(nn.Module):
             h = h + r
 
         return h
-
-
-def _create_causal_mask(seq_len: int) -> Optional[mx.array]:
-    """Create additive causal attention mask."""
-    if seq_len <= 1:
-        return None
-
-    indices = mx.arange(seq_len)
-    mask = (indices[:, None] < indices[None, :]).astype(mx.float32) * -1e9
-    return mask
-
-
-def _sample_top_p(logits: mx.array, p: float) -> mx.array:
-    """
-    Top-p (nucleus) sampling.
-
-    Args:
-        logits: Un-normalized logits (batch, vocab_size)
-        p: Cumulative probability threshold
-
-    Returns:
-        Sampled token IDs (batch,)
-    """
-    if p >= 1.0:
-        return mx.random.categorical(logits)
-
-    probs = mx.softmax(logits, axis=-1)
-    sorted_indices = mx.argsort(probs, axis=-1)[:, ::-1]
-    sorted_probs = mx.take_along_axis(probs, sorted_indices, axis=-1)
-
-    cumulative_probs = mx.cumsum(sorted_probs, axis=-1)
-
-    # Mask tokens beyond the cumulative threshold (keep at least one)
-    mask = (cumulative_probs - sorted_probs) >= p
-    sorted_probs = mx.where(mask, mx.zeros_like(sorted_probs), sorted_probs)
-
-    # Re-normalize
-    sorted_probs = sorted_probs / mx.sum(sorted_probs, axis=-1, keepdims=True)
-
-    # Sample from filtered distribution
-    sampled_idx = mx.random.categorical(mx.log(sorted_probs + 1e-10))
-
-    # Map back to original vocabulary indices
-    next_token = mx.take_along_axis(sorted_indices, sampled_idx[:, None], axis=-1)[:, 0]
-    return next_token
 
 
 class KimiODMoEModel(nn.Module):
@@ -280,15 +357,25 @@ class KimiODMoEModel(nn.Module):
         """
         h = self.embed_tokens(input_ids)
 
-        mask = _create_causal_mask(h.shape[1])
+        # Build causal mask accounting for cached tokens
+        cache_offset = cache[0].offset if cache else 0
+        kv_len = h.shape[1] + cache_offset
+        mask = _create_causal_mask(h.shape[1], kv_len)
+
+        lookahead = self.config.shadow_lookahead
+        eval_interval = max(1, self.config.num_hidden_layers // 4)
 
         for i, layer in enumerate(self.layers):
             layer_cache = cache[i] if cache else None
             h = layer(h, mask=mask, cache=layer_cache)
 
-            # Trigger shadow model predictions for prefetch
-            if self.shadow_runner and i < self.config.num_hidden_layers - 4:
+            # Trigger shadow model predictions for prefetch (configurable lookahead)
+            if self.shadow_runner and i < self.config.num_hidden_layers - lookahead:
                 self.shadow_runner.predict_async(h, i)
+
+            # Periodic evaluation to bound graph memory on large models
+            if i > 0 and i % eval_interval == 0:
+                mx.eval(h)
 
         h = self.norm(h)
         return self.lm_head(h)
@@ -299,6 +386,8 @@ class KimiODMoEModel(nn.Module):
         max_new_tokens: int = 100,
         temperature: float = 0.6,
         top_p: float = 0.9,
+        eos_token_id: Optional[int] = None,
+        log_interval: int = 0,
     ) -> Generator[int, None, None]:
         """
         Streaming autoregressive generation with KV cache.
@@ -308,10 +397,15 @@ class KimiODMoEModel(nn.Module):
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature (0 = greedy)
             top_p: Nucleus sampling threshold
+            eos_token_id: Stop token (defaults to config.eos_token_id)
+            log_interval: Print cache stats every N steps (0 = disabled)
 
         Yields:
             Generated token IDs one at a time
         """
+        if eos_token_id is None:
+            eos_token_id = self.config.eos_token_id
+
         cache = [KVCache() for _ in self.layers]
 
         # Prefill: process full prompt
@@ -330,13 +424,13 @@ class KimiODMoEModel(nn.Module):
             token_id = next_token.item()
             yield token_id
 
-            if token_id == 0:
+            if token_id == eos_token_id:
                 break
 
             # Decode step: process just the new token with KV cache
             logits = self(next_token.reshape(1, 1), cache=cache)
             mx.eval(logits)
 
-            if step % 50 == 0 and self.expert_store:
+            if log_interval > 0 and step % log_interval == 0 and self.expert_store:
                 stats = self.expert_store.get_stats()
                 print(f"Step {step}: Cache hit rate {stats['hit_rate']:.2%}")
