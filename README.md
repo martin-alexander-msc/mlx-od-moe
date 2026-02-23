@@ -60,6 +60,9 @@ This creates:
 - `/Volumes/Storage/experts/base_model/` (multiple base safetensors files)
 - `/Volumes/Storage/experts/experts/` (per-expert safetensors files)
 
+Note: converter currently expects dequantized/fp GGUF tensors. Quantized packed GGUF
+blobs (common in Ollama) are not yet supported for extraction.
+
 #### 2. Run Inference Server
 
 ```bash
