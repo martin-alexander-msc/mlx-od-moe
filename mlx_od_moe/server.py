@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from .model import KimiODMoEModel, KimiODMoEConfig
+from .weight_loader import load_base_weight_items
 
 
 app = Flask(__name__)
@@ -50,6 +51,29 @@ def _detokenize(token_id: int) -> str:
     return chr(token_id) if 32 <= token_id < 127 else ""
 
 
+def _collect_model_weight_shapes(model: KimiODMoEModel) -> dict[str, tuple[int, ...]]:
+    """Flatten model.parameters() into {parameter_name: shape}."""
+    shapes: dict[str, tuple[int, ...]] = {}
+
+    def _walk(value, prefix: str = ""):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_prefix = f"{prefix}.{key}" if prefix else key
+                _walk(child, child_prefix)
+            return
+        if isinstance(value, list):
+            for idx, child in enumerate(value):
+                child_prefix = f"{prefix}.{idx}" if prefix else str(idx)
+                _walk(child, child_prefix)
+            return
+
+        shape = tuple(int(dim) for dim in value.shape)
+        shapes[prefix] = shape
+
+    _walk(model.parameters())
+    return shapes
+
+
 def initialize_model(
     expert_dir: str,
     base_weights: str,
@@ -63,16 +87,6 @@ def initialize_model(
     config = KimiODMoEConfig()
     model = KimiODMoEModel(config)
 
-    # Load base weights
-    print(f"Loading base weights from {base_weights}...")
-    try:
-        weights = mx.load(base_weights)
-        model.load_weights(list(weights.items()))
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Base weights not found: {base_weights}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load base weights from {base_weights}: {e}")
-
     # Setup OD-MoE
     try:
         model.setup_od_moe(expert_dir, cache_size_gb=cache_size_gb)
@@ -80,6 +94,21 @@ def initialize_model(
         raise FileNotFoundError(f"Expert directory not found: {expert_dir}")
     except Exception as e:
         raise RuntimeError(f"Failed to setup OD-MoE from {expert_dir}: {e}")
+
+    # Load base weights (single safetensors file OR converted base_model directory)
+    print(f"Loading base weights from {base_weights}...")
+    try:
+        expected_shapes = _collect_model_weight_shapes(model)
+        weight_items, load_stats = load_base_weight_items(base_weights, mx.load, expected_shapes)
+        model.load_weights(weight_items)
+        print(
+            f"Loaded {load_stats['loaded']} base tensors "
+            f"(skipped {load_stats['skipped']} / {load_stats['source_tensors']})"
+        )
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Base weights not found: {base_weights}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load base weights from {base_weights}: {e}")
 
     # Load tokenizer
     if tokenizer_path:

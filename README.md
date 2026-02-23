@@ -56,14 +56,16 @@ python -m mlx_od_moe.convert \
   --output /Volumes/Storage/experts
 ```
 
-This extracts experts from GGUF format and saves them as memory-mappable `.npy` files.
+This creates:
+- `/Volumes/Storage/experts/base_model/` (multiple base safetensors files)
+- `/Volumes/Storage/experts/experts/` (per-expert safetensors files)
 
 #### 2. Run Inference Server
 
 ```bash
 python -m mlx_od_moe.server \
-  --expert-dir /Volumes/Storage/experts \
-  --base-weights /Volumes/Storage/base_model.safetensors \
+  --expert-dir /Volumes/Storage/experts/experts \
+  --base-weights /Volumes/Storage/experts/base_model \
   --port 8080
 ```
 
