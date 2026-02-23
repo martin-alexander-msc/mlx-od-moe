@@ -1,11 +1,12 @@
 # Task
 
-User reported server startup failure after GGUF conversion:
-- Converter output has `base_model/` directory.
-- Server expected a single `base_model.safetensors` path.
-- README command pathing was inconsistent with converter output.
+User approved additional changes after shape mismatch:
+- Make config naming more generic (`KimiODMoEConfig` -> generic naming).
+- Diagnose why converted artifacts still fail.
+
+Observed runtime artifacts showed:
+- Base embedding shape differs from hardcoded Kimi defaults.
+- All expert files were empty (16B, no tensors), indicating conversion incompatibility for provided model.
 
 Requested outcome:
-- Make runtime support converted directory layout.
-- Ensure compatible loading behavior for converted tensor names.
-- Update documentation to match real usage.
+- Improve runtime behavior and error clarity for incompatible conversions.

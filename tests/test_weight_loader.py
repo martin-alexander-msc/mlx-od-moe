@@ -12,6 +12,8 @@ SPEC.loader.exec_module(WEIGHT_LOADER)
 
 load_base_weight_items = WEIGHT_LOADER.load_base_weight_items
 map_gguf_key_to_model_key = WEIGHT_LOADER.map_gguf_key_to_model_key
+infer_config_overrides_from_base_shapes = WEIGHT_LOADER.infer_config_overrides_from_base_shapes
+validate_expert_conversion = WEIGHT_LOADER.validate_expert_conversion
 
 
 def test_map_gguf_key_to_model_key_core_mappings():
@@ -87,3 +89,27 @@ def test_load_base_weight_items_raises_for_missing_path(tmp_path):
     missing = tmp_path / "missing.safetensors"
     with pytest.raises(FileNotFoundError):
         load_base_weight_items(str(missing), lambda _: {}, {})
+
+
+def test_infer_config_overrides_from_base_shapes(monkeypatch):
+    def fake_shapes(_base_weights: str):
+        return {
+            "token_embd.weight": (32000, 2304),
+            "blk.0.attn_q.weight": (4096, 2304),
+            "blk.31.attn_q.weight": (4096, 2304),
+        }
+
+    monkeypatch.setattr(WEIGHT_LOADER, "inspect_base_weight_shapes", fake_shapes)
+    inferred = infer_config_overrides_from_base_shapes("/tmp/base_model")
+    assert inferred == {"vocab_size": 32000, "hidden_size": 2304, "num_hidden_layers": 32}
+
+
+def test_validate_expert_conversion_rejects_empty_registry(tmp_path):
+    expert_dir = tmp_path / "experts"
+    expert_dir.mkdir()
+    (expert_dir / "registry.json").write_text(
+        '{"layer_00_expert_000":{"path":"x","size":16,"layer":0,"expert_id":0,"tensors":[]}}'
+    )
+
+    with pytest.raises(ValueError, match="All converted experts are empty"):
+        validate_expert_conversion(str(expert_dir))

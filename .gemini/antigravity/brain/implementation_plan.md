@@ -1,20 +1,18 @@
 # Implementation Plan
 
 ## Goal
-Fix server startup so GGUF-converted `base_model/` directories load correctly, with key translation from GGUF tensor names to runtime model parameter names.
+Improve startup robustness for non-Kimi conversions and surface actionable errors when conversion output is incompatible.
 
 ## Files to Modify
+- `mlx_od_moe/model.py`
+- `mlx_od_moe/__init__.py`
 - `mlx_od_moe/server.py`
-- `mlx_od_moe/weight_loader.py` (new)
-- `tests/test_weight_loader.py` (new)
-- `README.md`
+- `mlx_od_moe/weight_loader.py`
+- `tests/test_weight_loader.py`
 
 ## Approach
-1. Add a dedicated weight loader utility that:
-   - Accepts either a safetensors file path or a `base_model/` directory.
-   - Loads known component files from directory output.
-   - Maps GGUF tensor keys (e.g. `blk.0.attn_q.weight`) to model keys (e.g. `layers.0.attention.q_proj.weight`).
-   - Performs safe transpose when source and destination shapes are reversed.
-2. Update server initialization order to set up OD-MoE layers first, then load remapped base weights.
-3. Add unit tests for mapping, directory loading, and key shape handling.
-4. Correct README quick-start commands and output description.
+1. Introduce a generic config class name (`ODMoEConfig`) and keep `KimiODMoEConfig` as compatibility alias.
+2. Infer safe config overrides (`vocab_size`, `hidden_size`, `num_hidden_layers`) from base weight tensor metadata.
+3. Validate expert conversion before model init and fail fast if all experts are empty.
+4. Improve shape mismatch errors to include source tensor key and target model key.
+5. Add unit tests for inferred config metadata and empty expert detection.
