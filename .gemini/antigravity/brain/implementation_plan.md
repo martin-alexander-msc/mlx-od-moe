@@ -1,7 +1,7 @@
 # Implementation Plan
 
 ## Goal
-Add converter support for packed MoE expert tensor naming and prevent invalid outputs from quantized packed GGUF blobs.
+Enable conversion from Q4-quantized GGUF MoE models by dequantizing tensors during conversion and preserving correct tensor orientation.
 
 ## Files to Modify
 - `convert/gguf_to_od_moe.py`
@@ -9,12 +9,9 @@ Add converter support for packed MoE expert tensor naming and prevent invalid ou
 - `README.md`
 
 ## Approach
-1. Add packed expert extraction path for tensors:
-   - `blk.{L}.ffn_gate_exps.weight`
-   - `blk.{L}.ffn_down_exps.weight`
-   - `blk.{L}.ffn_up_exps.weight`
-2. Keep existing explicit-per-expert extraction path intact.
-3. Auto-detect `num_layers` and `num_experts` from GGUF metadata by default.
-4. Improve base extraction routing key inclusion for `ffn_gate_inp`.
-5. Add fail-fast validation for quantized packed tensors so converter raises clear errors instead of writing invalid safetensors.
-6. Add/extend tests for packed slicing and quantized guard behavior.
+1. Use `gguf.quants.dequantize` for all tensor reads in converter.
+2. Align dequantized arrays to GGUF metadata shapes, including reversed-axis transpose handling.
+3. Keep packed expert extraction (`ffn_gate_exps`, `ffn_down_exps`, `ffn_up_exps`) and explicit expert extraction paths.
+4. Keep metadata auto-detection for `num_layers` and `num_experts`.
+5. Add tests for axis alignment and Q4 tensor dequantization path.
+6. Update README to remove now-obsolete "quantized not supported" note.

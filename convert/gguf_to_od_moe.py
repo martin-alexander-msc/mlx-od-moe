@@ -14,27 +14,38 @@ from typing import Dict
 import json
 import numpy as np
 import gguf
+from gguf import quants
 from safetensors.numpy import save_file
 from tqdm import tqdm
+
+
+def _align_to_meta_shape(array: np.ndarray, meta_shape: tuple[int, ...], tensor_name: str) -> np.ndarray:
+    """Align dequantized tensor array to GGUF metadata shape."""
+    if tuple(array.shape) == meta_shape:
+        return array
+
+    reversed_shape = tuple(reversed(array.shape))
+    if reversed_shape == meta_shape:
+        axes = tuple(reversed(range(array.ndim)))
+        return np.transpose(array, axes=axes)
+
+    raise ValueError(
+        f"Could not align tensor {tensor_name} to metadata shape: "
+        f"array_shape={array.shape}, meta_shape={meta_shape}"
+    )
 
 
 def _read_tensor_data(tensor):
     """
     Read tensor payload from GGUF.
 
-    Current converter expects dequantized numeric arrays. Quantized GGUF blobs from
-    runtimes like Ollama expose packed uint8 blocks, which need explicit dequantization.
+    Dequantizes GGUF tensor payloads (including Q4/Q8 variants) to float32 and aligns
+    axes to GGUF metadata shape.
     """
-    data = tensor.data
+    qtype = gguf.GGMLQuantizationType(tensor.tensor_type)
+    data = quants.dequantize(tensor.data, qtype)
     meta_shape = tuple(int(x) for x in tensor.shape)
-    data_shape = tuple(int(x) for x in data.shape)
-    if data.dtype == np.uint8 and data_shape != meta_shape:
-        raise ValueError(
-            f"Tensor {tensor.name} is quantized/packed (dtype={data.dtype}, "
-            f"data_shape={data_shape}, expected_shape={meta_shape}). "
-            "This converter currently requires dequantized/fp tensors."
-        )
-    return data
+    return _align_to_meta_shape(data, meta_shape, tensor.name)
 
 
 def parse_gguf_metadata(filepath: Path) -> Dict:
