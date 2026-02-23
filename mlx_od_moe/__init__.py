@@ -5,13 +5,14 @@ __version__ = "0.1.0"
 from .expert_store import UnifiedMemoryExpertStore
 from .shadow_model import ExpertPredictor, ShadowRunner
 from .od_moe_layer import ODMoELayer
-from .model import KimiODMoEModel, KimiODMoEConfig, KVCache, Attention, TransformerBlock
+from .model import ODMoEConfig, KimiODMoEModel, KimiODMoEConfig, KVCache, Attention, TransformerBlock
 
 __all__ = [
     "UnifiedMemoryExpertStore",
     "ExpertPredictor",
     "ShadowRunner",
     "ODMoELayer",
+    "ODMoEConfig",
     "KimiODMoEModel",
     "KimiODMoEConfig",
     "KVCache",

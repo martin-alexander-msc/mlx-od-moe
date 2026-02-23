@@ -24,8 +24,8 @@ from .shadow_model import ShadowRunner
 from .od_moe_layer import ODMoELayer
 
 
-class KimiODMoEConfig:
-    """Configuration matching Kimi-K2.5 architecture."""
+class ODMoEConfig:
+    """Configuration for OD-MoE model variants."""
 
     def __init__(
         self,
@@ -196,7 +196,7 @@ def _sample_top_p(logits: mx.array, p: float) -> mx.array:
 class Attention(nn.Module):
     """Grouped Query Attention with RoPE."""
 
-    def __init__(self, config: KimiODMoEConfig):
+    def __init__(self, config: ODMoEConfig):
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -256,7 +256,7 @@ class Attention(nn.Module):
 class TransformerBlock(nn.Module):
     """Pre-norm transformer block: Attention + OD-MoE FFN."""
 
-    def __init__(self, config: KimiODMoEConfig, layer_idx: int):
+    def __init__(self, config: ODMoEConfig, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         self.attention = Attention(config)
@@ -296,7 +296,7 @@ class KimiODMoEModel(nn.Module):
     Total: ~54GB resident + 325GB memory-mapped on SSD
     """
 
-    def __init__(self, config: KimiODMoEConfig):
+    def __init__(self, config: ODMoEConfig):
         super().__init__()
         self.config = config
 
@@ -434,3 +434,7 @@ class KimiODMoEModel(nn.Module):
             if log_interval > 0 and step % log_interval == 0 and self.expert_store:
                 stats = self.expert_store.get_stats()
                 print(f"Step {step}: Cache hit rate {stats['hit_rate']:.2%}")
+
+
+# Backward-compatible alias while migrating call sites.
+KimiODMoEConfig = ODMoEConfig

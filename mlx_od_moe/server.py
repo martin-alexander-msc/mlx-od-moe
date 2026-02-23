@@ -12,8 +12,13 @@ import json
 import time
 from typing import Optional
 
-from .model import KimiODMoEModel, KimiODMoEConfig
-from .weight_loader import load_base_weight_items
+from .model import KimiODMoEModel, ODMoEConfig
+from .weight_loader import (
+    load_base_weight_items,
+    infer_config_overrides_from_base_shapes,
+    validate_expert_conversion,
+    infer_num_local_experts,
+)
 
 
 app = Flask(__name__)
@@ -83,8 +88,26 @@ def initialize_model(
     """Initialize model with OD-MoE."""
     global model
 
-    print("Initializing Kimi OD-MoE model...")
-    config = KimiODMoEConfig()
+    print("Initializing OD-MoE model...")
+    try:
+        validate_expert_conversion(expert_dir)
+    except Exception as e:
+        raise RuntimeError(f"Invalid expert conversion in {expert_dir}: {e}")
+
+    try:
+        overrides = infer_config_overrides_from_base_shapes(base_weights)
+        inferred_experts = infer_num_local_experts(expert_dir)
+        if inferred_experts is not None:
+            overrides["num_local_experts"] = inferred_experts
+    except Exception as e:
+        raise RuntimeError(f"Failed to infer model config from converted weights: {e}")
+
+    config = ODMoEConfig(**overrides)
+    print(
+        "Resolved config: "
+        f"vocab={config.vocab_size}, hidden={config.hidden_size}, "
+        f"layers={config.num_hidden_layers}, experts/layer={config.num_local_experts}"
+    )
     model = KimiODMoEModel(config)
 
     # Setup OD-MoE
