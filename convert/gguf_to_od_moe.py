@@ -8,15 +8,33 @@ Input: Kimi-K2.5.gguf (375GB)
 Output: 10,752 expert files + base model
 """
 
-import struct
-import numpy as np
 from pathlib import Path
 import argparse
 from typing import Dict
 import json
+import numpy as np
 import gguf
 from safetensors.numpy import save_file
 from tqdm import tqdm
+
+
+def _read_tensor_data(tensor):
+    """
+    Read tensor payload from GGUF.
+
+    Current converter expects dequantized numeric arrays. Quantized GGUF blobs from
+    runtimes like Ollama expose packed uint8 blocks, which need explicit dequantization.
+    """
+    data = tensor.data
+    meta_shape = tuple(int(x) for x in tensor.shape)
+    data_shape = tuple(int(x) for x in data.shape)
+    if data.dtype == np.uint8 and data_shape != meta_shape:
+        raise ValueError(
+            f"Tensor {tensor.name} is quantized/packed (dtype={data.dtype}, "
+            f"data_shape={data_shape}, expected_shape={meta_shape}). "
+            "This converter currently requires dequantized/fp tensors."
+        )
+    return data
 
 
 def parse_gguf_metadata(filepath: Path) -> Dict:
@@ -84,6 +102,12 @@ def parse_gguf_metadata(filepath: Path) -> Dict:
         # The value is in parts[-1] as numpy array
         value = reader.fields[expert_key].parts[-1]
         num_experts = int(value.item() if hasattr(value, 'item') else value)
+    elif architecture:
+        # Llama/Mixtral-style metadata
+        arch_expert_key = f"{architecture}.expert_count"
+        if arch_expert_key in reader.fields:
+            value = reader.fields[arch_expert_key].parts[-1]
+            num_experts = int(value.item() if hasattr(value, 'item') else value)
 
     # Build tensor metadata dict
     tensors = {}
@@ -96,11 +120,10 @@ def parse_gguf_metadata(filepath: Path) -> Dict:
         }
 
     # Extract vocab size from token embeddings tensor
-    # Token embeddings shape in GGUF: [dim, vocab_size]
+    # Token embeddings are [vocab_size, dim] in this converter/test setup.
     vocab_size = None
     if "token_embd.weight" in tensors:
-        # GGUF stores as [dim, vocab_size], so vocab_size is shape[1]
-        vocab_size = tensors["token_embd.weight"]["shape"][1]
+        vocab_size = tensors["token_embd.weight"]["shape"][0]
 
     total_tensors = len(tensors)
 
@@ -148,7 +171,7 @@ def extract_base_model(gguf_path: Path, output_dir: Path):
     # Iterate through tensors with progress bar
     for tensor in tqdm(reader.tensors, desc="Reading tensors"):
         tensor_name = tensor.name
-        tensor_data = tensor.data
+        tensor_data = _read_tensor_data(tensor)
 
         # Categorize based on tensor name
         if "token_embd" in tensor_name:
@@ -157,9 +180,83 @@ def extract_base_model(gguf_path: Path, output_dir: Path):
             lm_head[tensor_name] = tensor_data
         elif "norm" in tensor_name and "experts" not in tensor_name:
             norms[tensor_name] = tensor_data
-        elif "attn" in tensor_name or "ffn.gate" in tensor_name:
+        elif (
+            "attn" in tensor_name
+            or "ffn.gate" in tensor_name
+            or "ffn_gate_inp" in tensor_name
+        ):
             # Attention layers + router/gate (part of base model)
             attention_layers[tensor_name] = tensor_data
+
+
+def _slice_packed_expert_tensor(tensor_data, expert_idx: int, num_experts: int):
+    """
+    Slice one expert from packed MoE tensors.
+
+    Supports layouts where one axis equals num_experts, e.g. [H, F, E].
+    """
+    shape = tuple(int(x) for x in tensor_data.shape)
+    matching_axes = [axis for axis, dim in enumerate(shape) if dim == num_experts]
+    if not matching_axes:
+        raise ValueError(f"No expert axis found for packed tensor shape {shape}")
+    if len(matching_axes) > 1:
+        raise ValueError(
+            f"Ambiguous expert axis for packed tensor shape {shape}: {matching_axes}"
+        )
+
+    axis = matching_axes[0]
+    return tensor_data.take(indices=expert_idx, axis=axis)
+
+
+def _extract_expert_tensors_for_layer(
+    tensor_lookup: dict,
+    layer: int,
+    expert: int,
+    num_experts: int,
+):
+    """
+    Extract one expert from either:
+    - explicit per-expert tensors, or
+    - packed per-layer expert tensors (Mixtral/Codextral style).
+    """
+    # Format A: explicit per-expert names
+    w1_name = f"blk.{layer}.ffn.experts.{expert}.w1.weight"
+    w2_name = f"blk.{layer}.ffn.experts.{expert}.w2.weight"
+    w3_name = f"blk.{layer}.ffn.experts.{expert}.w3.weight"
+
+    expert_tensors = {}
+    if w1_name in tensor_lookup:
+        expert_tensors["w1.weight"] = _read_tensor_data(tensor_lookup[w1_name])
+    if w2_name in tensor_lookup:
+        expert_tensors["w2.weight"] = _read_tensor_data(tensor_lookup[w2_name])
+    if w3_name in tensor_lookup:
+        expert_tensors["w3.weight"] = _read_tensor_data(tensor_lookup[w3_name])
+    if expert_tensors:
+        return expert_tensors
+
+    # Format B: packed per-layer tensors
+    gate_exps_name = f"blk.{layer}.ffn_gate_exps.weight"
+    down_exps_name = f"blk.{layer}.ffn_down_exps.weight"
+    up_exps_name = f"blk.{layer}.ffn_up_exps.weight"
+
+    if (
+        gate_exps_name in tensor_lookup
+        and down_exps_name in tensor_lookup
+        and up_exps_name in tensor_lookup
+    ):
+        gate_exps = _read_tensor_data(tensor_lookup[gate_exps_name])
+        down_exps = _read_tensor_data(tensor_lookup[down_exps_name])
+        up_exps = _read_tensor_data(tensor_lookup[up_exps_name])
+
+        # Runtime expects:
+        # w1 = gate projection, w2 = down projection, w3 = up projection
+        return {
+            "w1.weight": _slice_packed_expert_tensor(gate_exps, expert, num_experts),
+            "w2.weight": _slice_packed_expert_tensor(down_exps, expert, num_experts),
+            "w3.weight": _slice_packed_expert_tensor(up_exps, expert, num_experts),
+        }
+
+    return {}
 
     # Save categorized tensors as safetensors files
     if embeddings:
@@ -222,22 +319,12 @@ def extract_experts(gguf_path: Path, output_dir: Path, num_layers: int = 28, num
                 # Build key
                 key = f"layer_{layer:02d}_expert_{expert:03d}"
 
-                # Get tensor names for this expert
-                w1_name = f"blk.{layer}.ffn.experts.{expert}.w1.weight"
-                w2_name = f"blk.{layer}.ffn.experts.{expert}.w2.weight"
-                w3_name = f"blk.{layer}.ffn.experts.{expert}.w3.weight"
-
-                # Extract tensors from tensor_lookup
-                expert_tensors = {}
-
-                if w1_name in tensor_lookup:
-                    expert_tensors["w1.weight"] = tensor_lookup[w1_name].data
-
-                if w2_name in tensor_lookup:
-                    expert_tensors["w2.weight"] = tensor_lookup[w2_name].data
-
-                if w3_name in tensor_lookup:
-                    expert_tensors["w3.weight"] = tensor_lookup[w3_name].data
+                expert_tensors = _extract_expert_tensors_for_layer(
+                    tensor_lookup=tensor_lookup,
+                    layer=layer,
+                    expert=expert,
+                    num_experts=num_experts,
+                )
 
                 # Save to safetensors
                 save_path = expert_dir / f"{key}.safetensors"
@@ -272,8 +359,8 @@ def extract_experts(gguf_path: Path, output_dir: Path, num_layers: int = 28, num
 def convert_gguf_to_od_moe(
     input_path: str,
     output_dir: str,
-    num_layers: int = 28,
-    num_experts: int = 384
+    num_layers: int | None = None,
+    num_experts: int | None = None,
 ):
     """
     Full conversion: GGUF → OD-MoE format.
@@ -281,8 +368,8 @@ def convert_gguf_to_od_moe(
     Args:
         input_path: Path to GGUF file
         output_dir: Output directory for experts + base model
-        num_layers: Number of transformer layers
-        num_experts: Experts per layer
+        num_layers: Number of transformer layers (auto-detected if None)
+        num_experts: Experts per layer (auto-detected if None)
     """
     input_file = Path(input_path)
     output_path = Path(output_dir)
@@ -297,6 +384,14 @@ def convert_gguf_to_od_moe(
     
     # Parse metadata
     metadata = parse_gguf_metadata(input_file)
+
+    # Auto-detect layers/experts when not explicitly provided.
+    if num_layers is None:
+        num_layers = metadata.get("num_layers") or 28
+        print(f"Auto-detected num_layers={num_layers}")
+    if num_experts is None:
+        num_experts = metadata.get("num_experts") or 384
+        print(f"Auto-detected num_experts={num_experts}")
     
     # Extract base model
     extract_base_model(input_file, output_path)
@@ -314,8 +409,18 @@ def main():
     parser = argparse.ArgumentParser(description="Convert GGUF to OD-MoE format")
     parser.add_argument("--input", required=True, help="Input GGUF file")
     parser.add_argument("--output", required=True, help="Output directory")
-    parser.add_argument("--num-layers", type=int, default=28, help="Number of layers")
-    parser.add_argument("--num-experts", type=int, default=384, help="Experts per layer")
+    parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=None,
+        help="Number of layers (default: auto-detect from GGUF metadata)",
+    )
+    parser.add_argument(
+        "--num-experts",
+        type=int,
+        default=None,
+        help="Experts per layer (default: auto-detect from GGUF metadata)",
+    )
     
     args = parser.parse_args()
     

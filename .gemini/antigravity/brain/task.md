@@ -1,12 +1,12 @@
 # Task
 
-User approved additional changes after shape mismatch:
-- Make config naming more generic (`KimiODMoEConfig` -> generic naming).
-- Diagnose why converted artifacts still fail.
+User requested converter fixes for Codextral GGUF.
 
-Observed runtime artifacts showed:
-- Base embedding shape differs from hardcoded Kimi defaults.
-- All expert files were empty (16B, no tensors), indicating conversion incompatibility for provided model.
+Investigation found:
+- Source GGUF uses packed MoE tensors (`ffn_*_exps`) not explicit `ffn.experts.{i}.w*` keys.
+- Prior conversion produced empty expert files.
+- Source GGUF blob is quantized packed (uint8 blocks), which current converter cannot faithfully dequantize.
 
 Requested outcome:
-- Improve runtime behavior and error clarity for incompatible conversions.
+- Support packed tensor naming format.
+- Surface explicit error for unsupported quantized packed GGUF payloads.
