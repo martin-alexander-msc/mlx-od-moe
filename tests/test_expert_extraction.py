@@ -17,6 +17,7 @@ from convert.gguf_to_od_moe import (
     extract_experts,
     _extract_expert_tensors_for_layer,
     _read_tensor_data,
+    _align_to_meta_shape,
 )
 from safetensors import safe_open
 
@@ -166,13 +167,22 @@ def test_extract_experts_supports_packed_moe_layout():
     assert tensors["w3.weight"][0, 0] == up.data[0, 0, 2]
 
 
-def test_read_tensor_data_rejects_quantized_packed_layout():
+def test_align_to_meta_shape_transposes_reversed_axes():
+    arr = np.arange(2 * 3 * 4).reshape(4, 3, 2)
+    out = _align_to_meta_shape(arr, (2, 3, 4), "dummy")
+    assert out.shape == (2, 3, 4)
+    assert out[0, 0, 0] == arr[0, 0, 0]
+    assert out[1, 2, 3] == arr[3, 2, 1]
+
+
+def test_read_tensor_data_dequantizes_q4_layout():
     class Tensor:
         name = "blk.0.ffn_gate_exps.weight"
         # GGUF metadata shape
         shape = (4096, 14336, 8)
         # Packed quantized payload shape
         data = np.zeros((8, 14336, 2304), dtype=np.uint8)
+        tensor_type = 2  # GGMLQuantizationType.Q4_0
 
-    with pytest.raises(ValueError, match="quantized/packed"):
-        _read_tensor_data(Tensor())
+    out = _read_tensor_data(Tensor())
+    assert out.shape == (4096, 14336, 8)
