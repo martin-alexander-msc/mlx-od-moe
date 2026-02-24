@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from collections import OrderedDict
 import time
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import mlx.core as mx
@@ -20,7 +20,37 @@ import gguf
 from gguf import quants
 
 
-def infer_gguf_moe_metadata(gguf_path: str) -> dict[str, int]:
+def _coerce_gguf_field_value(field) -> Any:
+    part = field.parts[-1]
+    if isinstance(part, np.ndarray):
+        if part.size == 1:
+            return part.reshape(()).item()
+        return [x.item() if hasattr(x, "item") else x for x in part.reshape(-1)]
+    if hasattr(part, "item"):
+        try:
+            return part.item()
+        except Exception:
+            pass
+    if hasattr(part, "tobytes"):
+        try:
+            return part.tobytes().decode("utf-8")
+        except Exception:
+            pass
+    return part
+
+
+def _scalarize(value: Any, default: Any = None) -> Any:
+    if isinstance(value, list):
+        if not value:
+            return default
+        numeric = [v for v in value if isinstance(v, (int, float, np.integer, np.floating))]
+        if not numeric:
+            return default
+        return numeric[0]
+    return value
+
+
+def infer_gguf_moe_metadata(gguf_path: str) -> dict[str, Any]:
     """Infer MoE-relevant metadata from GGUF fields."""
     path = Path(gguf_path)
     if not path.exists():
@@ -32,7 +62,7 @@ def infer_gguf_moe_metadata(gguf_path: str) -> dict[str, int]:
         part = reader.fields["general.architecture"].parts[-1]
         arch = part.tobytes().decode("utf-8") if hasattr(part, "tobytes") else str(part)
 
-    meta = {}
+    meta: dict[str, Any] = {}
     if arch:
         for field_name, target in [
             (f"{arch}.block_count", "num_hidden_layers"),
@@ -43,10 +73,55 @@ def infer_gguf_moe_metadata(gguf_path: str) -> dict[str, int]:
             (f"{arch}.attention.head_count", "num_attention_heads"),
             (f"{arch}.attention.head_count_kv", "num_key_value_heads"),
             (f"{arch}.rope.dimension_count", "head_dim"),
+            (f"{arch}.attention.key_length", "attention_key_length"),
+            (f"{arch}.attention.value_length", "attention_value_length"),
+            (f"{arch}.rope.freq_base", "rope_theta"),
+            (f"{arch}.context_length", "max_position_embeddings"),
+            (f"{arch}.full_attention_interval", "full_attention_interval"),
+            (f"{arch}.norm_top_k_prob", "norm_topk_prob"),
+            (f"{arch}.expert_used_count", "num_experts_per_tok"),
+            (f"{arch}.expert_feed_forward_length", "moe_intermediate_size"),
+            (f"{arch}.expert_shared_feed_forward_length", "shared_expert_intermediate_size"),
+            (f"{arch}.ssm.group_count", "linear_num_key_heads"),
+            (f"{arch}.ssm.state_size", "linear_state_size"),
+            (f"{arch}.ssm.inner_size", "linear_inner_size"),
+            (f"{arch}.ssm.conv_kernel", "linear_conv_kernel_dim"),
         ]:
             if field_name in reader.fields:
-                value = reader.fields[field_name].parts[-1]
-                meta[target] = int(value.item() if hasattr(value, "item") else value)
+                value = _coerce_gguf_field_value(reader.fields[field_name])
+                value = _scalarize(value, default=value)
+                if target == "norm_topk_prob":
+                    meta[target] = bool(value)
+                elif target == "rope_theta":
+                    meta[target] = float(value)
+                else:
+                    meta[target] = int(value)
+
+        # Derive linear-attention dims for Qwen3Next-style metadata.
+        if (
+            "linear_num_key_heads" in meta
+            and "linear_state_size" in meta
+            and "linear_inner_size" in meta
+        ):
+            state = int(meta["linear_state_size"])
+            inner = int(meta["linear_inner_size"])
+            meta["linear_key_head_dim"] = state
+            meta["linear_value_head_dim"] = state
+            if state > 0:
+                meta["linear_num_value_heads"] = inner // state
+
+        if "attention_key_length" in meta and "num_attention_heads" in meta:
+            key_len = int(meta["attention_key_length"])
+            heads = int(meta["num_attention_heads"])
+            if heads > 0:
+                meta["head_dim"] = key_len
+                meta["partial_rotary_factor"] = 0.25
+
+        rope_field = f"{arch}.rope.dimension_count"
+        if rope_field in reader.fields and "attention_key_length" in meta:
+            rope_dim = _scalarize(_coerce_gguf_field_value(reader.fields[rope_field]))
+            if isinstance(rope_dim, (int, float)) and int(meta["attention_key_length"]) > 0:
+                meta["partial_rotary_factor"] = float(rope_dim) / float(meta["attention_key_length"])
     return meta
 
 

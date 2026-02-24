@@ -217,6 +217,118 @@ def map_gguf_key_to_model_key(key: str) -> str:
     return key
 
 
+def map_qwen3next_key_to_model_key(key: str) -> str:
+    """Map Qwen3Next GGUF tensor names to Qwen3NextODMoEModel parameter names."""
+    if key == "token_embd.weight":
+        return "embed_tokens.weight"
+    if key == "output.weight":
+        return "lm_head.weight"
+    if key == "output_norm.weight":
+        return "norm.weight"
+
+    attn_norm = re.fullmatch(r"blk\.(\d+)\.attn_norm\.weight", key)
+    if attn_norm:
+        layer = attn_norm.group(1)
+        return f"layers.{layer}.input_layernorm.weight"
+
+    post_attn_norm = re.fullmatch(r"blk\.(\d+)\.post_attention_norm\.weight", key)
+    if post_attn_norm:
+        layer = post_attn_norm.group(1)
+        return f"layers.{layer}.post_attention_layernorm.weight"
+
+    q_norm = re.fullmatch(r"blk\.(\d+)\.attn_q_norm\.weight", key)
+    if q_norm:
+        layer = q_norm.group(1)
+        return f"layers.{layer}.self_attn.q_norm.weight"
+
+    k_norm = re.fullmatch(r"blk\.(\d+)\.attn_k_norm\.weight", key)
+    if k_norm:
+        layer = k_norm.group(1)
+        return f"layers.{layer}.self_attn.k_norm.weight"
+
+    qkvz = re.fullmatch(r"blk\.(\d+)\.attn_qkvz\.weight", key)
+    if qkvz:
+        layer = qkvz.group(1)
+        return f"layers.{layer}.linear_attn.in_proj_qkvz.weight"
+
+    ssm_ba = re.fullmatch(r"blk\.(\d+)\.ssm_ba\.weight", key)
+    if ssm_ba:
+        layer = ssm_ba.group(1)
+        return f"layers.{layer}.linear_attn.in_proj_ba.weight"
+
+    ssm_dt = re.fullmatch(r"blk\.(\d+)\.ssm_dt", key)
+    if ssm_dt:
+        layer = ssm_dt.group(1)
+        return f"layers.{layer}.linear_attn.dt_bias"
+
+    ssm_a = re.fullmatch(r"blk\.(\d+)\.ssm_a", key)
+    if ssm_a:
+        layer = ssm_a.group(1)
+        return f"layers.{layer}.linear_attn.A_log"
+
+    ssm_norm = re.fullmatch(r"blk\.(\d+)\.ssm_norm\.weight", key)
+    if ssm_norm:
+        layer = ssm_norm.group(1)
+        return f"layers.{layer}.linear_attn.norm.weight"
+
+    ssm_out = re.fullmatch(r"blk\.(\d+)\.ssm_out\.weight", key)
+    if ssm_out:
+        layer = ssm_out.group(1)
+        return f"layers.{layer}.linear_attn.out_proj.weight"
+
+    ssm_conv = re.fullmatch(r"blk\.(\d+)\.ssm_conv1d\.weight", key)
+    if ssm_conv:
+        layer = ssm_conv.group(1)
+        return f"layers.{layer}.linear_attn.conv1d.weight"
+
+    attn_q = re.fullmatch(r"blk\.(\d+)\.attn_q\.weight", key)
+    if attn_q:
+        layer = attn_q.group(1)
+        return f"layers.{layer}.self_attn.q_proj.weight"
+
+    attn_k = re.fullmatch(r"blk\.(\d+)\.attn_k\.weight", key)
+    if attn_k:
+        layer = attn_k.group(1)
+        return f"layers.{layer}.self_attn.k_proj.weight"
+
+    attn_v = re.fullmatch(r"blk\.(\d+)\.attn_v\.weight", key)
+    if attn_v:
+        layer = attn_v.group(1)
+        return f"layers.{layer}.self_attn.v_proj.weight"
+
+    attn_o = re.fullmatch(r"blk\.(\d+)\.attn_output\.weight", key)
+    if attn_o:
+        layer = attn_o.group(1)
+        return f"layers.{layer}.self_attn.o_proj.weight"
+
+    gate = re.fullmatch(r"blk\.(\d+)\.ffn_gate_inp\.weight", key)
+    if gate:
+        layer = gate.group(1)
+        return f"layers.{layer}.mlp.local_moe.gate.weight"
+
+    shared_gate = re.fullmatch(r"blk\.(\d+)\.ffn_gate_inp_shexp\.weight", key)
+    if shared_gate:
+        layer = shared_gate.group(1)
+        return f"layers.{layer}.mlp.shared_expert_gate.weight"
+
+    shared_w1 = re.fullmatch(r"blk\.(\d+)\.ffn_gate_shexp\.weight", key)
+    if shared_w1:
+        layer = shared_w1.group(1)
+        return f"layers.{layer}.mlp.shared_expert.gate_proj.weight"
+
+    shared_w2 = re.fullmatch(r"blk\.(\d+)\.ffn_down_shexp\.weight", key)
+    if shared_w2:
+        layer = shared_w2.group(1)
+        return f"layers.{layer}.mlp.shared_expert.down_proj.weight"
+
+    shared_w3 = re.fullmatch(r"blk\.(\d+)\.ffn_up_shexp\.weight", key)
+    if shared_w3:
+        layer = shared_w3.group(1)
+        return f"layers.{layer}.mlp.shared_expert.up_proj.weight"
+
+    return key
+
+
 def _as_tuple(shape: Any) -> tuple[int, ...]:
     return tuple(int(dim) for dim in shape)
 
@@ -227,6 +339,17 @@ def _transpose_if_needed(tensor: Any, expected_shape: tuple[int, ...], source_ke
         return tensor
     if len(tensor_shape) == 2 and tensor_shape[::-1] == expected_shape:
         return tensor.T
+    # Qwen3Next GGUF exports depthwise conv weights as 2D (kernel, channels)
+    # while MLX Conv1d expects (channels, kernel, 1).
+    if (
+        len(tensor_shape) == 2
+        and len(expected_shape) == 3
+        and expected_shape[2] == 1
+    ):
+        if tensor_shape == (expected_shape[0], expected_shape[1]):
+            return tensor[:, :, None]
+        if tensor_shape == (expected_shape[1], expected_shape[0]):
+            return tensor.T[:, :, None]
     hint = ""
     if source_key.startswith("blk.") and ".attn_" in source_key:
         hint = (
@@ -250,6 +373,8 @@ def load_base_weight_items(
     base_weights: str,
     load_fn: Callable[[str], dict[str, Any]],
     expected_shapes: dict[str, tuple[int, ...]],
+    map_key_fn: Callable[[str], str] = map_gguf_key_to_model_key,
+    preprocess_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> tuple[list[tuple[str, Any]], dict[str, int]]:
     """
     Load base weights from a file or from a converted base_model directory.
@@ -265,11 +390,13 @@ def load_base_weight_items(
     component_files = _resolve_base_component_files(base_path)
     for component in component_files:
         source_dict.update(_load_weight_dict(component, load_fn))
+    if preprocess_fn is not None:
+        source_dict = preprocess_fn(source_dict)
 
     result: list[tuple[str, Any]] = []
     skipped = 0
     for source_key, tensor in source_dict.items():
-        model_key = map_gguf_key_to_model_key(source_key)
+        model_key = map_key_fn(source_key)
         expected_shape = expected_shapes.get(model_key)
         if expected_shape is None:
             skipped += 1

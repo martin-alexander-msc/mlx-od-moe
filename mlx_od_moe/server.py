@@ -10,10 +10,11 @@ from flask import Flask, request, jsonify, Response
 import mlx.core as mx
 import json
 import time
-from typing import Optional
+from typing import Optional, Any
 import re
 
 from .model import KimiODMoEModel, ODMoEConfig
+from .qwen3_next_od_model import Qwen3NextODMoEModel, Qwen3NextODConfig
 from .gguf_expert_store import infer_gguf_moe_metadata
 from .weight_loader import (
     load_base_weight_items,
@@ -21,11 +22,12 @@ from .weight_loader import (
     inspect_base_weight_shapes,
     validate_expert_conversion,
     infer_num_local_experts,
+    map_qwen3next_key_to_model_key,
 )
 
 
 app = Flask(__name__)
-model: Optional[KimiODMoEModel] = None
+model: Optional[Any] = None
 tokenizer = None
 
 
@@ -59,7 +61,7 @@ def _detokenize(token_id: int) -> str:
     return chr(token_id) if 32 <= token_id < 127 else ""
 
 
-def _collect_model_weight_shapes(model: KimiODMoEModel) -> dict[str, tuple[int, ...]]:
+def _collect_model_weight_shapes(model: Any) -> dict[str, tuple[int, ...]]:
     """Flatten model.parameters() into {parameter_name: shape}."""
     shapes: dict[str, tuple[int, ...]] = {}
 
@@ -82,6 +84,62 @@ def _collect_model_weight_shapes(model: KimiODMoEModel) -> dict[str, tuple[int, 
     return shapes
 
 
+def _is_qwen3next_schema(base_shapes: dict[str, tuple[int, ...]]) -> bool:
+    return any(re.fullmatch(r"blk\.\d+\.attn_qkv\.weight", k) for k in base_shapes)
+
+
+def _validate_qwen3next_base_shapes(base_shapes: dict[str, tuple[int, ...]]) -> None:
+    required = [
+        "blk.0.ssm_conv1d.weight",
+        "blk.0.ssm_ba.weight",
+        "blk.0.ssm_a",
+        "blk.0.ssm_dt",
+        "blk.0.ssm_out.weight",
+        "blk.0.ffn_gate_shexp.weight",
+        "blk.0.ffn_up_shexp.weight",
+        "blk.0.ffn_down_shexp.weight",
+    ]
+    missing = [k for k in required if k not in base_shapes]
+    if missing:
+        raise RuntimeError(
+            "Qwen3Next base conversion is missing required tensors "
+            f"{missing}. Re-run base extraction with the updated converter "
+            "(convert/gguf_to_od_moe.py --base-only)."
+        )
+
+
+def _preprocess_qwen3next_source_tensors(source_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Build fused Qwen3Next linear-attention qkvz projection tensor:
+    blk.N.attn_qkv.weight + blk.N.attn_gate.weight -> blk.N.attn_qkvz.weight
+    """
+    processed = dict(source_dict)
+    pattern = re.compile(r"blk\.(\d+)\.attn_qkv\.weight$")
+
+    for key in list(source_dict.keys()):
+        m = pattern.match(key)
+        if not m:
+            continue
+        layer = m.group(1)
+        gate_key = f"blk.{layer}.attn_gate.weight"
+        if gate_key not in source_dict:
+            continue
+
+        qkv = source_dict[key]
+        gate = source_dict[gate_key]
+        if len(qkv.shape) != 2 or len(gate.shape) != 2 or qkv.shape[0] != gate.shape[0]:
+            raise RuntimeError(
+                f"Cannot fuse Qwen3Next qkv/gate for layer {layer}: "
+                f"qkv.shape={qkv.shape}, gate.shape={gate.shape}"
+            )
+
+        processed[f"blk.{layer}.attn_qkvz.weight"] = mx.concatenate([qkv, gate], axis=1)
+        processed.pop(key, None)
+        processed.pop(gate_key, None)
+
+    return processed
+
+
 def initialize_model(
     expert_dir: Optional[str],
     base_weights: str,
@@ -102,9 +160,11 @@ def initialize_model(
             raise RuntimeError(f"Invalid expert conversion in {expert_dir}: {e}")
 
     try:
+        base_shapes = inspect_base_weight_shapes(base_weights)
         overrides = infer_config_overrides_from_base_shapes(base_weights)
+        gguf_meta = infer_gguf_moe_metadata(gguf_experts) if gguf_experts else {}
+
         if gguf_experts:
-            gguf_meta = infer_gguf_moe_metadata(gguf_experts)
             for key in (
                 "num_local_experts",
                 "num_hidden_layers",
@@ -112,6 +172,8 @@ def initialize_model(
                 "num_attention_heads",
                 "num_key_value_heads",
                 "head_dim",
+                "max_position_embeddings",
+                "rope_theta",
             ):
                 if key in gguf_meta:
                     overrides[key] = gguf_meta[key]
@@ -122,128 +184,75 @@ def initialize_model(
     except Exception as e:
         raise RuntimeError(f"Failed to infer model config from converted weights: {e}")
 
-    # Reconcile attention dimensions with actual converted base tensor shapes.
-    try:
-        shapes = inspect_base_weight_shapes(base_weights)
+    qwen3next_mode = _is_qwen3next_schema(base_shapes)
+    map_key_fn = None
+    preprocess_fn = None
 
-        def _find_attn_shape(kind: str):
-            blk_pat = re.compile(rf"blk\.(\d+)\.attn_{kind}\.weight$")
-            layers_pat = re.compile(rf"layers\.(\d+)\.attention\.{kind}_proj\.weight$")
-            candidates = []
-            for key, shape in shapes.items():
-                m = blk_pat.match(key)
-                if m:
-                    candidates.append((int(m.group(1)), key, shape))
-                    continue
-                m = layers_pat.match(key)
-                if m:
-                    candidates.append((int(m.group(1)), key, shape))
-            if not candidates:
-                return None, None
-            candidates.sort(key=lambda x: x[0])
-            _, key, shape = candidates[0]
-            return key, shape
+    if qwen3next_mode:
+        try:
+            _validate_qwen3next_base_shapes(base_shapes)
+        except Exception as e:
+            raise RuntimeError(f"Invalid Qwen3Next base conversion: {e}")
 
-        q_key, q_shape = _find_attn_shape("q")
-        k_key, k_shape = _find_attn_shape("k")
-        v_key, v_shape = _find_attn_shape("v")
+        q_overrides = dict(overrides)
+        for key in (
+            "full_attention_interval",
+            "norm_topk_prob",
+            "num_experts_per_tok",
+            "moe_intermediate_size",
+            "shared_expert_intermediate_size",
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+            "linear_conv_kernel_dim",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "partial_rotary_factor",
+            "max_position_embeddings",
+            "rope_theta",
+        ):
+            if key in gguf_meta:
+                q_overrides[key] = gguf_meta[key]
 
-        hidden = int(overrides["hidden_size"])
+        # Conservative defaults for Qwen3Next-Coder-Next family.
+        q_overrides.setdefault("full_attention_interval", 4)
+        q_overrides.setdefault("norm_topk_prob", True)
+        q_overrides.setdefault("num_experts_per_tok", 10)
+        q_overrides.setdefault("moe_intermediate_size", 512)
+        q_overrides.setdefault("shared_expert_intermediate_size", 512)
+        q_overrides.setdefault("num_attention_heads", 16)
+        q_overrides.setdefault("num_key_value_heads", 2)
+        q_overrides.setdefault("head_dim", 256)
+        q_overrides.setdefault("partial_rotary_factor", 0.25)
+        q_overrides.setdefault("linear_num_key_heads", 16)
+        q_overrides.setdefault("linear_num_value_heads", 32)
+        q_overrides.setdefault("linear_key_head_dim", 128)
+        q_overrides.setdefault("linear_value_head_dim", 128)
+        q_overrides.setdefault("linear_conv_kernel_dim", 4)
 
-        def _proj_out(shape):
-            if not shape or len(shape) != 2:
-                return None
-            a, b = int(shape[0]), int(shape[1])
-            if a == hidden and b != hidden:
-                return b
-            if b == hidden and a != hidden:
-                return a
-            return max(a, b)
-
-        q_out = _proj_out(q_shape)
-        k_out = _proj_out(k_shape)
-        v_out = _proj_out(v_shape)
-        kv_proj_out = k_out or v_out
+        print(f"Inferred Qwen3Next config overrides: {q_overrides}")
+        config = Qwen3NextODConfig(**q_overrides)
         print(
-            "Discovered attention tensor shapes: "
-            f"q={q_key}:{q_shape}, k={k_key}:{k_shape}, v={v_key}:{v_shape}"
+            "Resolved Qwen3Next config: "
+            f"vocab={config.vocab_size}, hidden={config.hidden_size}, "
+            f"layers={config.num_hidden_layers}, experts/layer={config.num_local_experts}, "
+            f"full_attn_interval={config.full_attention_interval}"
         )
+        model = Qwen3NextODMoEModel(config)
+        map_key_fn = map_qwen3next_key_to_model_key
+        preprocess_fn = _preprocess_qwen3next_source_tensors
+    else:
+        # Legacy GQA-only ODMoE path.
+        print(f"Inferred config overrides: {overrides}")
+        config = ODMoEConfig(**overrides)
         print(
-            "Derived projection widths: "
-            f"q_out={q_out}, k_out={k_out}, v_out={v_out}, kv_proj_out={kv_proj_out}"
+            "Resolved config: "
+            f"vocab={config.vocab_size}, hidden={config.hidden_size}, "
+            f"layers={config.num_hidden_layers}, experts/layer={config.num_local_experts}"
         )
-
-        if q_out and kv_proj_out:
-            head_dim = int(overrides["head_dim"]) if "head_dim" in overrides else None
-            q_heads = (
-                int(overrides["num_attention_heads"])
-                if "num_attention_heads" in overrides
-                else None
-            )
-            kv_heads = (
-                int(overrides["num_key_value_heads"])
-                if "num_key_value_heads" in overrides
-                else None
-            )
-
-            # If rope/head_dim metadata is available, projection tensor widths are the source of truth.
-            # Some GGUFs expose head counts that do not match projection packing for this runtime.
-            if head_dim is not None and q_out % head_dim == 0 and kv_proj_out % head_dim == 0:
-                q_heads = q_out // head_dim
-                kv_heads = kv_proj_out // head_dim
-                overrides["num_attention_heads"] = q_heads
-                overrides["num_key_value_heads"] = kv_heads
-
-            if q_heads is not None and kv_heads is not None:
-                if q_out % q_heads != 0 or kv_proj_out % kv_heads != 0:
-                    raise RuntimeError(
-                        f"Head counts do not match base tensor projection sizes: "
-                        f"q_out={q_out}, kv_proj_out={kv_proj_out}, num_attention_heads={q_heads}, "
-                        f"num_key_value_heads={kv_heads}"
-                    )
-                q_head_dim = q_out // q_heads
-                kv_head_dim = kv_proj_out // kv_heads
-                if q_head_dim != kv_head_dim:
-                    raise RuntimeError(
-                        f"Inconsistent inferred head dims from base tensors: "
-                        f"q_head_dim={q_head_dim}, kv_head_dim={kv_head_dim}"
-                    )
-                overrides["head_dim"] = q_head_dim
-                if q_heads % kv_heads != 0:
-                    raise RuntimeError(
-                        f"Invalid attention grouping inferred from base tensors: "
-                        f"num_attention_heads={q_heads}, num_key_value_heads={kv_heads}"
-                    )
-                if v_out:
-                    if v_out % kv_heads != 0:
-                        raise RuntimeError(
-                            f"Value projection width is not divisible by kv heads: "
-                            f"v_out={v_out}, num_key_value_heads={kv_heads}"
-                        )
-                    overrides["value_head_dim"] = v_out // kv_heads
-                print(
-                    "Resolved attention projection dims: "
-                    f"q_out={q_out}, k_out={k_out}, v_out={v_out}, "
-                    f"q_heads={q_heads}, kv_heads={kv_heads}, "
-                    f"head_dim={overrides.get('head_dim')}, "
-                    f"value_head_dim={overrides.get('value_head_dim')}"
-                )
-            elif head_dim is None:
-                raise RuntimeError(
-                    "Could not determine attention head configuration. "
-                    "GGUF metadata must provide head_count/head_count_kv or rope.dimension_count."
-                )
-    except Exception as e:
-        raise RuntimeError(f"Failed to reconcile attention dimensions: {e}")
-
-    print(f"Inferred config overrides: {overrides}")
-    config = ODMoEConfig(**overrides)
-    print(
-        "Resolved config: "
-        f"vocab={config.vocab_size}, hidden={config.hidden_size}, "
-        f"layers={config.num_hidden_layers}, experts/layer={config.num_local_experts}"
-    )
-    model = KimiODMoEModel(config)
+        model = KimiODMoEModel(config)
 
     # Setup OD-MoE
     try:
@@ -264,7 +273,23 @@ def initialize_model(
     print(f"Loading base weights from {base_weights}...")
     try:
         expected_shapes = _collect_model_weight_shapes(model)
-        weight_items, load_stats = load_base_weight_items(base_weights, mx.load, expected_shapes)
+        if qwen3next_mode:
+            print("Using Qwen3Next base-weight mapping and preprocessing")
+        if map_key_fn is None:
+            weight_items, load_stats = load_base_weight_items(
+                base_weights,
+                mx.load,
+                expected_shapes,
+                preprocess_fn=preprocess_fn,
+            )
+        else:
+            weight_items, load_stats = load_base_weight_items(
+                base_weights,
+                mx.load,
+                expected_shapes,
+                map_key_fn=map_key_fn,
+                preprocess_fn=preprocess_fn,
+            )
         model.load_weights(weight_items)
         print(
             f"Loaded {load_stats['loaded']} base tensors "
