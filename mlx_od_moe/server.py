@@ -11,6 +11,7 @@ import mlx.core as mx
 import json
 import time
 from typing import Optional
+import re
 
 from .model import KimiODMoEModel, ODMoEConfig
 from .gguf_expert_store import infer_gguf_moe_metadata
@@ -124,9 +125,28 @@ def initialize_model(
     # Reconcile attention dimensions with actual converted base tensor shapes.
     try:
         shapes = inspect_base_weight_shapes(base_weights)
-        q_shape = shapes.get("blk.0.attn_q.weight") or shapes.get("layers.0.attention.q_proj.weight")
-        k_shape = shapes.get("blk.0.attn_k.weight") or shapes.get("layers.0.attention.k_proj.weight")
-        v_shape = shapes.get("blk.0.attn_v.weight") or shapes.get("layers.0.attention.v_proj.weight")
+
+        def _find_attn_shape(kind: str):
+            blk_pat = re.compile(rf"blk\.(\d+)\.attn_{kind}\.weight$")
+            layers_pat = re.compile(rf"layers\.(\d+)\.attention\.{kind}_proj\.weight$")
+            candidates = []
+            for key, shape in shapes.items():
+                m = blk_pat.match(key)
+                if m:
+                    candidates.append((int(m.group(1)), key, shape))
+                    continue
+                m = layers_pat.match(key)
+                if m:
+                    candidates.append((int(m.group(1)), key, shape))
+            if not candidates:
+                return None, None
+            candidates.sort(key=lambda x: x[0])
+            _, key, shape = candidates[0]
+            return key, shape
+
+        q_key, q_shape = _find_attn_shape("q")
+        k_key, k_shape = _find_attn_shape("k")
+        v_key, v_shape = _find_attn_shape("v")
 
         hidden = int(overrides["hidden_size"])
 
@@ -144,6 +164,14 @@ def initialize_model(
         k_out = _proj_out(k_shape)
         v_out = _proj_out(v_shape)
         kv_proj_out = k_out or v_out
+        print(
+            "Discovered attention tensor shapes: "
+            f"q={q_key}:{q_shape}, k={k_key}:{k_shape}, v={v_key}:{v_shape}"
+        )
+        print(
+            "Derived projection widths: "
+            f"q_out={q_out}, k_out={k_out}, v_out={v_out}, kv_proj_out={kv_proj_out}"
+        )
 
         if q_out and kv_proj_out:
             head_dim = int(overrides["head_dim"]) if "head_dim" in overrides else None
