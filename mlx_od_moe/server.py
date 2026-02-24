@@ -184,6 +184,14 @@ def initialize_model(
                         f"Invalid attention grouping inferred from base tensors: "
                         f"num_attention_heads={q_heads}, num_key_value_heads={kv_heads}"
                     )
+                v_out = _proj_out(v_shape)
+                if v_out:
+                    if v_out % kv_heads != 0:
+                        raise RuntimeError(
+                            f"Value projection width is not divisible by kv heads: "
+                            f"v_out={v_out}, num_key_value_heads={kv_heads}"
+                        )
+                    overrides["value_head_dim"] = v_out // kv_heads
             elif head_dim is None:
                 raise RuntimeError(
                     "Could not determine attention head configuration. "
