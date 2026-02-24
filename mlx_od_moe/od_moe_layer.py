@@ -42,8 +42,8 @@ class ODMoELayer(nn.Module):
         self.expert_store = expert_store
         self.shadow_runner = shadow_runner
         
-        # Router/gate (always resident, small: 4096 * 384 ≈ 1.5MB)
-        self.gate = nn.Linear(hidden_dim, num_experts)
+        # Router/gate (GGUF exports gate weights without bias)
+        self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
         
         # Currently loaded experts (working set)
         # Format: {expert_idx: (w1, w2, w3)}
