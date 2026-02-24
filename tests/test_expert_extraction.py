@@ -186,3 +186,16 @@ def test_read_tensor_data_dequantizes_q4_layout():
 
     out = _read_tensor_data(Tensor())
     assert out.shape == (4096, 14336, 8)
+    assert out.dtype == np.float16
+
+
+def test_read_tensor_data_allows_float32_output():
+    class Tensor:
+        name = "blk.0.ffn_gate_exps.weight"
+        shape = (4096, 14336, 8)
+        data = np.zeros((8, 14336, 2304), dtype=np.uint8)
+        tensor_type = 2  # GGMLQuantizationType.Q4_0
+
+    out = _read_tensor_data(Tensor(), output_dtype=np.float32)
+    assert out.shape == (4096, 14336, 8)
+    assert out.dtype == np.float32
