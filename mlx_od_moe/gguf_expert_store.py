@@ -40,6 +40,9 @@ def infer_gguf_moe_metadata(gguf_path: str) -> dict[str, int]:
             (f"{arch}.embedding_length", "hidden_size"),
             (f"{arch}.feed_forward_length", "intermediate_size"),
             (f"{arch}.vocab_size", "vocab_size"),
+            (f"{arch}.attention.head_count", "num_attention_heads"),
+            (f"{arch}.attention.head_count_kv", "num_key_value_heads"),
+            (f"{arch}.rope.dimension_count", "head_dim"),
         ]:
             if field_name in reader.fields:
                 value = reader.fields[field_name].parts[-1]

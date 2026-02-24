@@ -17,6 +17,7 @@ from .gguf_expert_store import infer_gguf_moe_metadata
 from .weight_loader import (
     load_base_weight_items,
     infer_config_overrides_from_base_shapes,
+    inspect_base_weight_shapes,
     validate_expert_conversion,
     infer_num_local_experts,
 )
@@ -103,18 +104,63 @@ def initialize_model(
         overrides = infer_config_overrides_from_base_shapes(base_weights)
         if gguf_experts:
             gguf_meta = infer_gguf_moe_metadata(gguf_experts)
-            if "num_local_experts" in gguf_meta:
-                overrides["num_local_experts"] = gguf_meta["num_local_experts"]
-            if "num_hidden_layers" in gguf_meta:
-                overrides["num_hidden_layers"] = gguf_meta["num_hidden_layers"]
-            if "intermediate_size" in gguf_meta:
-                overrides["intermediate_size"] = gguf_meta["intermediate_size"]
+            for key in (
+                "num_local_experts",
+                "num_hidden_layers",
+                "intermediate_size",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "head_dim",
+            ):
+                if key in gguf_meta:
+                    overrides[key] = gguf_meta[key]
         else:
             inferred_experts = infer_num_local_experts(expert_dir)
             if inferred_experts is not None:
                 overrides["num_local_experts"] = inferred_experts
     except Exception as e:
         raise RuntimeError(f"Failed to infer model config from converted weights: {e}")
+
+    # Reconcile attention dimensions with actual converted base tensor shapes.
+    try:
+        shapes = inspect_base_weight_shapes(base_weights)
+        q_shape = shapes.get("blk.0.attn_q.weight") or shapes.get("layers.0.attention.q_proj.weight")
+        k_shape = shapes.get("blk.0.attn_k.weight") or shapes.get("layers.0.attention.k_proj.weight")
+
+        hidden = int(overrides["hidden_size"])
+
+        def _proj_out(shape):
+            if not shape or len(shape) != 2:
+                return None
+            a, b = int(shape[0]), int(shape[1])
+            if a == hidden and b != hidden:
+                return b
+            if b == hidden and a != hidden:
+                return a
+            return max(a, b)
+
+        q_out = _proj_out(q_shape)
+        k_out = _proj_out(k_shape)
+
+        if q_out and k_out and "num_attention_heads" in overrides and "num_key_value_heads" in overrides:
+            q_heads = int(overrides["num_attention_heads"])
+            kv_heads = int(overrides["num_key_value_heads"])
+            if q_out % q_heads != 0 or k_out % kv_heads != 0:
+                raise RuntimeError(
+                    f"GGUF head metadata does not match base tensor projection sizes: "
+                    f"q_out={q_out}, k_out={k_out}, num_attention_heads={q_heads}, "
+                    f"num_key_value_heads={kv_heads}"
+                )
+            q_head_dim = q_out // q_heads
+            k_head_dim = k_out // kv_heads
+            if q_head_dim != k_head_dim:
+                raise RuntimeError(
+                    f"Inconsistent inferred head dims from base tensors: "
+                    f"q_head_dim={q_head_dim}, k_head_dim={k_head_dim}"
+                )
+            overrides["head_dim"] = q_head_dim
+    except Exception as e:
+        raise RuntimeError(f"Failed to reconcile attention dimensions: {e}")
 
     print(f"Inferred config overrides: {overrides}")
     config = ODMoEConfig(**overrides)

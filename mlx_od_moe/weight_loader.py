@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 import re
 import json
+import math
 
 from safetensors import safe_open
 
@@ -70,11 +71,14 @@ def infer_config_overrides_from_base_shapes(base_weights: str) -> dict[str, int]
     if not layer_indices:
         raise ValueError("Could not infer number of layers from base weights")
 
-    layer0_attn_v = tensor_shapes.get("blk.0.attn_v.weight") or tensor_shapes.get(
-        "layers.0.attention.v_proj.weight"
-    )
     layer0_attn_q = tensor_shapes.get("blk.0.attn_q.weight") or tensor_shapes.get(
         "layers.0.attention.q_proj.weight"
+    )
+    layer0_attn_k = tensor_shapes.get("blk.0.attn_k.weight") or tensor_shapes.get(
+        "layers.0.attention.k_proj.weight"
+    )
+    layer0_attn_v = tensor_shapes.get("blk.0.attn_v.weight") or tensor_shapes.get(
+        "layers.0.attention.v_proj.weight"
     )
     if layer0_attn_v and len(layer0_attn_v) == 2:
         # In both (hidden, kv_hidden) and (kv_hidden, hidden), hidden is the larger axis.
@@ -94,11 +98,46 @@ def infer_config_overrides_from_base_shapes(base_weights: str) -> dict[str, int]
         # If ambiguous, assume the larger axis is vocab.
         vocab_size = max(emb0, emb1)
 
+    def _infer_proj_out(shape: tuple[int, ...] | None) -> int | None:
+        if not shape or len(shape) != 2:
+            return None
+        a, b = int(shape[0]), int(shape[1])
+        if a == hidden_size and b != hidden_size:
+            return b
+        if b == hidden_size and a != hidden_size:
+            return a
+        return max(a, b)
+
+    q_proj_out = _infer_proj_out(layer0_attn_q)
+    kv_proj_out = _infer_proj_out(layer0_attn_k) or _infer_proj_out(layer0_attn_v)
+
+    # Fallback inference for non-square projections when GGUF metadata is unavailable.
+    inferred_num_heads = None
+    inferred_num_kv_heads = None
+    inferred_head_dim = None
+    if q_proj_out and kv_proj_out:
+        common = math.gcd(q_proj_out, kv_proj_out)
+        for candidate_head_dim in (128, 96, 80, 64, 40, 32, 16, 8):
+            if (
+                candidate_head_dim <= common
+                and q_proj_out % candidate_head_dim == 0
+                and kv_proj_out % candidate_head_dim == 0
+            ):
+                inferred_head_dim = candidate_head_dim
+                inferred_num_heads = q_proj_out // candidate_head_dim
+                inferred_num_kv_heads = kv_proj_out // candidate_head_dim
+                if inferred_num_heads % inferred_num_kv_heads == 0:
+                    break
+
     inferred = {
         "vocab_size": int(vocab_size),
         "hidden_size": int(hidden_size),
         "num_hidden_layers": max(layer_indices) + 1,
     }
+    if inferred_num_heads and inferred_num_kv_heads and inferred_head_dim:
+        inferred["num_attention_heads"] = int(inferred_num_heads)
+        inferred["num_key_value_heads"] = int(inferred_num_kv_heads)
+        inferred["head_dim"] = int(inferred_head_dim)
     return inferred
 
 
