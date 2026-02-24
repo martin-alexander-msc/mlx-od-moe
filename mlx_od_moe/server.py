@@ -142,23 +142,51 @@ def initialize_model(
         q_out = _proj_out(q_shape)
         k_out = _proj_out(k_shape)
 
-        if q_out and k_out and "num_attention_heads" in overrides and "num_key_value_heads" in overrides:
-            q_heads = int(overrides["num_attention_heads"])
-            kv_heads = int(overrides["num_key_value_heads"])
-            if q_out % q_heads != 0 or k_out % kv_heads != 0:
+        if q_out and k_out:
+            head_dim = int(overrides["head_dim"]) if "head_dim" in overrides else None
+            q_heads = (
+                int(overrides["num_attention_heads"])
+                if "num_attention_heads" in overrides
+                else None
+            )
+            kv_heads = (
+                int(overrides["num_key_value_heads"])
+                if "num_key_value_heads" in overrides
+                else None
+            )
+
+            if head_dim is not None:
+                if q_heads is None:
+                    if q_out % head_dim != 0:
+                        raise RuntimeError(f"q_out={q_out} is not divisible by head_dim={head_dim}")
+                    q_heads = q_out // head_dim
+                    overrides["num_attention_heads"] = q_heads
+                if kv_heads is None:
+                    if k_out % head_dim != 0:
+                        raise RuntimeError(f"k_out={k_out} is not divisible by head_dim={head_dim}")
+                    kv_heads = k_out // head_dim
+                    overrides["num_key_value_heads"] = kv_heads
+
+            if q_heads is not None and kv_heads is not None:
+                if q_out % q_heads != 0 or k_out % kv_heads != 0:
+                    raise RuntimeError(
+                        f"Head counts do not match base tensor projection sizes: "
+                        f"q_out={q_out}, k_out={k_out}, num_attention_heads={q_heads}, "
+                        f"num_key_value_heads={kv_heads}"
+                    )
+                q_head_dim = q_out // q_heads
+                k_head_dim = k_out // kv_heads
+                if q_head_dim != k_head_dim:
+                    raise RuntimeError(
+                        f"Inconsistent inferred head dims from base tensors: "
+                        f"q_head_dim={q_head_dim}, k_head_dim={k_head_dim}"
+                    )
+                overrides["head_dim"] = q_head_dim
+            elif head_dim is None:
                 raise RuntimeError(
-                    f"GGUF head metadata does not match base tensor projection sizes: "
-                    f"q_out={q_out}, k_out={k_out}, num_attention_heads={q_heads}, "
-                    f"num_key_value_heads={kv_heads}"
+                    "Could not determine attention head configuration. "
+                    "GGUF metadata must provide head_count/head_count_kv or rope.dimension_count."
                 )
-            q_head_dim = q_out // q_heads
-            k_head_dim = k_out // kv_heads
-            if q_head_dim != k_head_dim:
-                raise RuntimeError(
-                    f"Inconsistent inferred head dims from base tensors: "
-                    f"q_head_dim={q_head_dim}, k_head_dim={k_head_dim}"
-                )
-            overrides["head_dim"] = q_head_dim
     except Exception as e:
         raise RuntimeError(f"Failed to reconcile attention dimensions: {e}")
 
