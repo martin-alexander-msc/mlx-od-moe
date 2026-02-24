@@ -10,9 +10,15 @@ Validates that the extractor can:
 
 import pytest
 import json
+import numpy as np
 from pathlib import Path
 from convert.create_toy_model import create_toy_gguf_model
-from convert.gguf_to_od_moe import extract_experts
+from convert.gguf_to_od_moe import (
+    extract_experts,
+    _extract_expert_tensors_for_layer,
+    _read_tensor_data,
+    _align_to_meta_shape,
+)
 from safetensors import safe_open
 
 
@@ -123,3 +129,73 @@ def test_extract_experts_registry_metadata(toy_gguf, tmp_path):
     assert expert_info["layer"] == 0
     assert expert_info["expert_id"] == 0
     assert expert_info["size"] > 0  # File should have some size
+
+
+def test_extract_experts_supports_packed_moe_layout():
+    """Verify packed ffn_*_exps tensors are sliced into per-expert w1/w2/w3."""
+
+    class Tensor:
+        def __init__(self, data):
+            self.data = data
+
+    num_experts = 4
+    # Shapes: [hidden, ffn, experts], [ffn, hidden, experts], [hidden, ffn, experts]
+    gate = Tensor(np.arange(2 * 3 * num_experts).reshape(2, 3, num_experts))
+    down = Tensor(np.arange(3 * 2 * num_experts).reshape(3, 2, num_experts))
+    up = Tensor(np.arange(2 * 3 * num_experts).reshape(2, 3, num_experts) + 1000)
+
+    lookup = {
+        "blk.0.ffn_gate_exps.weight": gate,
+        "blk.0.ffn_down_exps.weight": down,
+        "blk.0.ffn_up_exps.weight": up,
+    }
+
+    tensors = _extract_expert_tensors_for_layer(
+        tensor_lookup=lookup,
+        layer=0,
+        expert=2,
+        num_experts=num_experts,
+    )
+
+    assert set(tensors.keys()) == {"w1.weight", "w2.weight", "w3.weight"}
+    assert tensors["w1.weight"].shape == (2, 3)
+    assert tensors["w2.weight"].shape == (3, 2)
+    assert tensors["w3.weight"].shape == (2, 3)
+    # Check expert-axis slicing correctness.
+    assert tensors["w1.weight"][0, 0] == gate.data[0, 0, 2]
+    assert tensors["w2.weight"][0, 0] == down.data[0, 0, 2]
+    assert tensors["w3.weight"][0, 0] == up.data[0, 0, 2]
+
+
+def test_align_to_meta_shape_transposes_reversed_axes():
+    arr = np.arange(2 * 3 * 4).reshape(4, 3, 2)
+    out = _align_to_meta_shape(arr, (2, 3, 4), "dummy")
+    assert out.shape == (2, 3, 4)
+    assert out[0, 0, 0] == arr[0, 0, 0]
+    assert out[1, 2, 3] == arr[3, 2, 1]
+
+
+def test_read_tensor_data_dequantizes_q4_layout():
+    class Tensor:
+        name = "blk.0.ffn_gate_exps.weight"
+        # GGUF metadata shape
+        shape = (4096, 14336, 8)
+        # Packed quantized payload shape
+        data = np.zeros((8, 14336, 2304), dtype=np.uint8)
+        tensor_type = 2  # GGMLQuantizationType.Q4_0
+
+    out = _read_tensor_data(Tensor())
+    assert out.shape == (4096, 14336, 8)
+    assert out.dtype == np.float16
+
+
+def test_read_tensor_data_allows_float32_output():
+    class Tensor:
+        name = "blk.0.ffn_gate_exps.weight"
+        shape = (4096, 14336, 8)
+        data = np.zeros((8, 14336, 2304), dtype=np.uint8)
+        tensor_type = 2  # GGMLQuantizationType.Q4_0
+
+    out = _read_tensor_data(Tensor(), output_dtype=np.float32)
+    assert out.shape == (4096, 14336, 8)
+    assert out.dtype == np.float32

@@ -53,19 +53,44 @@ pip install -e .
 ```bash
 python -m mlx_od_moe.convert \
   --input models/Kimi-K2.5.gguf \
-  --output /Volumes/Storage/experts
+  --output /Volumes/Storage/experts \
+  --output-dtype float16
 ```
 
-This extracts experts from GGUF format and saves them as memory-mappable `.npy` files.
+This creates:
+- `/Volumes/Storage/experts/base_model/` (multiple base safetensors files)
+- `/Volumes/Storage/experts/experts/` (per-expert safetensors files)
+
+Use `--output-dtype float16` to reduce disk usage versus float32 during Q4 dequantizing conversion.
 
 #### 2. Run Inference Server
 
 ```bash
 python -m mlx_od_moe.server \
-  --expert-dir /Volumes/Storage/experts \
-  --base-weights /Volumes/Storage/base_model.safetensors \
+  --expert-dir /Volumes/Storage/experts/experts \
+  --base-weights /Volumes/Storage/experts/base_model \
   --port 8080
 ```
+
+To avoid generating huge `experts/` outputs, you can keep experts in GGUF and
+only extract base weights:
+
+```bash
+uv run python3 -m convert.gguf_to_od_moe \
+  --input /path/to/model.gguf \
+  --output /Volumes/Storage/experts \
+  --output-dtype float16 \
+  --base-only
+
+uv run python3 -m mlx_od_moe.server \
+  --gguf-experts /path/to/model.gguf \
+  --base-weights /Volumes/Storage/experts/base_model \
+  --port 8080
+```
+
+Important for Qwen3-Next models: if `base_model` was produced with an older
+converter version, re-run `--base-only`. Newer extraction includes required
+`ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.
 
 #### 3. Query the Model
 

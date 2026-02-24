@@ -20,12 +20,13 @@ from typing import Optional, List, Generator
 from pathlib import Path
 
 from .expert_store import UnifiedMemoryExpertStore
+from .gguf_expert_store import GGUFOnDemandExpertStore
 from .shadow_model import ShadowRunner
 from .od_moe_layer import ODMoELayer
 
 
-class KimiODMoEConfig:
-    """Configuration matching Kimi-K2.5 architecture."""
+class ODMoEConfig:
+    """Configuration for OD-MoE model variants."""
 
     def __init__(
         self,
@@ -35,6 +36,8 @@ class KimiODMoEConfig:
         num_hidden_layers=28,
         num_attention_heads=32,
         num_key_value_heads=8,
+        head_dim=None,
+        value_head_dim=None,
         num_experts_per_tok=8,
         num_local_experts=384,
         max_position_embeddings=262144,
@@ -49,12 +52,17 @@ class KimiODMoEConfig:
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim if head_dim is not None else hidden_size // num_attention_heads
+        self.value_head_dim = value_head_dim if value_head_dim is not None else self.head_dim
+        if self.head_dim <= 0:
+            raise ValueError(f"Invalid head_dim={self.head_dim}")
+        if self.value_head_dim <= 0:
+            raise ValueError(f"Invalid value_head_dim={self.value_head_dim}")
         self.num_experts_per_tok = num_experts_per_tok
         self.num_local_experts = num_local_experts
         self.max_position_embeddings = max_position_embeddings
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
-        self.head_dim = hidden_size // num_attention_heads
         self.eos_token_id = eos_token_id
         self.shadow_lookahead = shadow_lookahead
 
@@ -196,18 +204,28 @@ def _sample_top_p(logits: mx.array, p: float) -> mx.array:
 class Attention(nn.Module):
     """Grouped Query Attention with RoPE."""
 
-    def __init__(self, config: KimiODMoEConfig):
+    def __init__(self, config: ODMoEConfig):
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
+        self.value_head_dim = config.value_head_dim
         self.scale = self.head_dim**-0.5
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_heads}) must be divisible by "
+                f"num_key_value_heads ({self.num_kv_heads})"
+            )
         self.num_kv_groups = self.num_heads // self.num_kv_heads
 
-        self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
+        q_out_dim = self.num_heads * self.head_dim
+        k_out_dim = self.num_kv_heads * self.head_dim
+        v_out_dim = self.num_kv_heads * self.value_head_dim
+
+        self.q_proj = nn.Linear(config.hidden_size, q_out_dim, bias=False)
+        self.k_proj = nn.Linear(config.hidden_size, k_out_dim, bias=False)
+        self.v_proj = nn.Linear(config.hidden_size, v_out_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.value_head_dim, config.hidden_size, bias=False)
 
         self.rope = nn.RoPE(self.head_dim, base=config.rope_theta)
 
@@ -226,7 +244,7 @@ class Attention(nn.Module):
         # Reshape: (B, L, num_heads, head_dim) -> (B, num_heads, L, head_dim)
         queries = queries.reshape(B, L, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         keys = keys.reshape(B, L, self.num_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
-        values = values.reshape(B, L, self.num_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, self.num_kv_heads, self.value_head_dim).transpose(0, 2, 1, 3)
 
         # Apply RoPE with cache offset
         offset = cache.offset if cache is not None else 0
@@ -256,7 +274,7 @@ class Attention(nn.Module):
 class TransformerBlock(nn.Module):
     """Pre-norm transformer block: Attention + OD-MoE FFN."""
 
-    def __init__(self, config: KimiODMoEConfig, layer_idx: int):
+    def __init__(self, config: ODMoEConfig, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         self.attention = Attention(config)
@@ -296,7 +314,7 @@ class KimiODMoEModel(nn.Module):
     Total: ~54GB resident + 325GB memory-mapped on SSD
     """
 
-    def __init__(self, config: KimiODMoEConfig):
+    def __init__(self, config: ODMoEConfig):
         super().__init__()
         self.config = config
 
@@ -311,19 +329,30 @@ class KimiODMoEModel(nn.Module):
 
     def setup_od_moe(
         self,
-        expert_dir: str,
+        expert_dir: Optional[str] = None,
+        gguf_expert_path: Optional[str] = None,
         predictor_path: Optional[str] = None,
         cache_size_gb: int = 48,
     ):
         """Initialize OD-MoE after base model weights are loaded."""
         print("Setting up OD-MoE...")
 
-        self.expert_store = UnifiedMemoryExpertStore(
-            expert_dir,
-            cache_size_gb=cache_size_gb,
-            num_layers=self.config.num_hidden_layers,
-            num_experts_per_layer=self.config.num_local_experts,
-        )
+        if gguf_expert_path:
+            self.expert_store = GGUFOnDemandExpertStore(
+                gguf_expert_path,
+                cache_size_gb=cache_size_gb,
+                num_layers=self.config.num_hidden_layers,
+                num_experts_per_layer=self.config.num_local_experts,
+            )
+        else:
+            if not expert_dir:
+                raise ValueError("expert_dir is required when gguf_expert_path is not set")
+            self.expert_store = UnifiedMemoryExpertStore(
+                expert_dir,
+                cache_size_gb=cache_size_gb,
+                num_layers=self.config.num_hidden_layers,
+                num_experts_per_layer=self.config.num_local_experts,
+            )
 
         self.shadow_runner = ShadowRunner(predictor_path)
 
@@ -434,3 +463,7 @@ class KimiODMoEModel(nn.Module):
             if log_interval > 0 and step % log_interval == 0 and self.expert_store:
                 stats = self.expert_store.get_stats()
                 print(f"Step {step}: Cache hit rate {stats['hit_rate']:.2%}")
+
+
+# Backward-compatible alias while migrating call sites.
+KimiODMoEConfig = ODMoEConfig
