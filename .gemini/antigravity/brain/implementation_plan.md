@@ -1,18 +1,17 @@
 # Implementation Plan
 
 ## Goal
-Add direct `.safetensors` input conversion path to OD-MoE layout, avoiding GGUF-specific dequantization complexity when MLX/HF safetensors are available.
+Fix safetensors converter failure on BF16 tensors in environments where numpy does not recognize `bfloat16`.
 
 ## Files to Modify
-- `convert/safetensors_to_od_moe.py` (new)
-- `convert/__init__.py`
-- `tests/test_safetensors_conversion.py` (new)
-- `README.md`
+- `convert/safetensors_to_od_moe.py`
+- `tests/test_safetensors_conversion.py`
 
 ## Approach
-1. Implement safetensors loader for file or directory inputs.
-2. Infer `num_layers`/`num_experts` from tensor keys when not provided.
-3. Split base tensors into `base_model/*.safetensors`.
-4. Extract per-expert tensors into `experts/layer_XX_expert_YYY.safetensors` and write `registry.json`.
-5. Support both explicit expert keys and packed per-layer expert tensors.
-6. Add focused tests for end-to-end safetensors conversion.
+1. Keep fast-path `safe_open(..., framework='numpy')` loading.
+2. Add fallback parser for BF16 TypeError:
+   - parse safetensors header directly,
+   - decode tensor payload bytes by dtype tag,
+   - decode BF16 into float32.
+3. Add unit test for BF16 byte decoding correctness.
+4. Validate loader on real mlx-community snapshot shard.

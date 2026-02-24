@@ -5,7 +5,10 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
-from convert.safetensors_to_od_moe import convert_safetensors_to_od_moe
+from convert.safetensors_to_od_moe import (
+    convert_safetensors_to_od_moe,
+    _decode_bfloat16_bytes,
+)
 
 
 def _create_toy_safetensors(path: Path, num_layers: int = 2, num_experts: int = 4):
@@ -68,3 +71,10 @@ def test_convert_safetensors_to_od_moe(tmp_path):
         assert "w2.weight" in f.keys()
         assert "w3.weight" in f.keys()
         assert f.get_tensor("w1.weight").dtype == np.float16
+
+
+def test_decode_bfloat16_bytes():
+    # BF16 values for [1.0, 2.0, -1.0] are upper 16 bits of float32.
+    raw = np.array([0x3F80, 0x4000, 0xBF80], dtype=np.uint16).tobytes()
+    out = _decode_bfloat16_bytes(raw, [3])
+    np.testing.assert_allclose(out, np.array([1.0, 2.0, -1.0], dtype=np.float32))

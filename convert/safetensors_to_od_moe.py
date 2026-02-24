@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import struct
 from pathlib import Path
 from typing import Dict
 
@@ -41,11 +42,65 @@ def _resolve_input_files(input_path: Path) -> list[Path]:
 def _load_tensors_from_safetensors(input_path: Path) -> Dict[str, np.ndarray]:
     tensors: Dict[str, np.ndarray] = {}
     for file_path in _resolve_input_files(input_path):
-        with safe_open(file_path, framework="numpy") as reader:
-            for key in reader.keys():
-                tensors[key] = reader.get_tensor(key)
+        try:
+            with safe_open(file_path, framework="numpy") as reader:
+                for key in reader.keys():
+                    tensors[key] = reader.get_tensor(key)
+        except TypeError as e:
+            if "bfloat16" not in str(e).lower():
+                raise
+            # Fallback for numpy builds without BF16 dtype support.
+            tensors.update(_load_tensors_from_safetensors_raw(file_path))
     if not tensors:
         raise ValueError(f"No tensors loaded from {input_path}")
+    return tensors
+
+
+def _decode_bfloat16_bytes(raw: bytes, shape: list[int]) -> np.ndarray:
+    u16 = np.frombuffer(raw, dtype="<u2")
+    u32 = u16.astype(np.uint32) << 16
+    f32 = u32.view(np.float32)
+    return f32.reshape(tuple(shape))
+
+
+def _decode_tensor_bytes(dtype_tag: str, raw: bytes, shape: list[int]) -> np.ndarray:
+    dtype_map = {
+        "F64": np.float64,
+        "F32": np.float32,
+        "F16": np.float16,
+        "I64": np.int64,
+        "I32": np.int32,
+        "I16": np.int16,
+        "I8": np.int8,
+        "U64": np.uint64,
+        "U32": np.uint32,
+        "U16": np.uint16,
+        "U8": np.uint8,
+        "BOOL": np.bool_,
+    }
+    if dtype_tag == "BF16":
+        return _decode_bfloat16_bytes(raw, shape)
+    if dtype_tag not in dtype_map:
+        raise ValueError(f"Unsupported safetensors dtype tag: {dtype_tag}")
+    arr = np.frombuffer(raw, dtype=dtype_map[dtype_tag])
+    return arr.reshape(tuple(shape))
+
+
+def _load_tensors_from_safetensors_raw(file_path: Path) -> Dict[str, np.ndarray]:
+    tensors: Dict[str, np.ndarray] = {}
+    with open(file_path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+        data = f.read()
+
+    for key, info in header.items():
+        if key == "__metadata__":
+            continue
+        dtype_tag = info["dtype"]
+        shape = info["shape"]
+        start, end = info["data_offsets"]
+        tensors[key] = _decode_tensor_bytes(dtype_tag, data[start:end], shape)
+
     return tensors
 
 

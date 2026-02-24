@@ -1,7 +1,7 @@
 # Task
 
-User requested support for converting from `.safetensors` input (e.g. MLX HF repos) because GGUF Q4/Q8 conversion dequantization inflates storage and adds complexity.
+User hit converter error:
+`TypeError: data type 'bfloat16' not understood`
 
 Requested outcome:
-- provide native safetensors conversion path to OD-MoE outputs,
-- preserve existing GGUF converter path.
+- make safetensors converter handle BF16 tensor files in current environment.
