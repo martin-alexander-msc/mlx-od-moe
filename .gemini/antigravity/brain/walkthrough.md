@@ -1,8 +1,8 @@
 # Walkthrough
 
-1. Added converter output dtype option with default `float16`.
-2. Updated tensor read/dequant path to cast to selected dtype.
-3. Threaded dtype through base model and expert extraction.
-4. Added unit tests to validate default fp16 and explicit fp32 behavior.
-5. Updated README conversion example to include `--output-dtype float16`.
-6. Fixed misplaced base-model save block so extraction writes files correctly.
+1. Added a new `safetensors_to_od_moe` converter module.
+2. Implemented safetensors file/directory loading and metadata inference for layers/experts.
+3. Added base/expert splitting and registry generation compatible with existing runtime expectations.
+4. Supported explicit and packed expert tensor naming styles.
+5. Added end-to-end test using synthetic safetensors input.
+6. Updated README with safetensors conversion usage.

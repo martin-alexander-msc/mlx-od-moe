@@ -48,11 +48,22 @@ pip install -e .
 
 ### Basic Usage
 
-#### 1. Convert a GGUF Model
+#### 1. Convert Model Weights
+
+From GGUF (supports Q4/Q8 dequantized conversion):
 
 ```bash
 python -m mlx_od_moe.convert \
   --input models/Kimi-K2.5.gguf \
+  --output /Volumes/Storage/experts \
+  --output-dtype float16
+```
+
+From safetensors (recommended when available):
+
+```bash
+python -m convert.safetensors_to_od_moe \
+  --input /path/to/model-or-dir \
   --output /Volumes/Storage/experts \
   --output-dtype float16
 ```

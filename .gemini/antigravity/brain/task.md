@@ -1,7 +1,7 @@
 # Task
 
-User ran out of disk converting Q4 GGUF because dequantized outputs were too large.
+User requested support for converting from `.safetensors` input (e.g. MLX HF repos) because GGUF Q4/Q8 conversion dequantization inflates storage and adds complexity.
 
 Requested outcome:
-- support fp16 conversion output to reduce storage,
-- keep current conversion flow and runtime compatibility.
+- provide native safetensors conversion path to OD-MoE outputs,
+- preserve existing GGUF converter path.

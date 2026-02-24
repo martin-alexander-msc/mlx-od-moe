@@ -1,16 +1,18 @@
 # Implementation Plan
 
 ## Goal
-Reduce conversion disk usage by supporting configurable output dtype and defaulting to float16 for dequantized tensors.
+Add direct `.safetensors` input conversion path to OD-MoE layout, avoiding GGUF-specific dequantization complexity when MLX/HF safetensors are available.
 
 ## Files to Modify
-- `convert/gguf_to_od_moe.py`
-- `tests/test_expert_extraction.py`
+- `convert/safetensors_to_od_moe.py` (new)
+- `convert/__init__.py`
+- `tests/test_safetensors_conversion.py` (new)
 - `README.md`
 
 ## Approach
-1. Add `--output-dtype {float16,float32}` (default `float16`) to converter CLI.
-2. Thread output dtype through base and expert extraction paths.
-3. Cast dequantized tensors to selected dtype before writing safetensors.
-4. Add tests for `_read_tensor_data(..., output_dtype=...)` dtype behavior.
-5. Document float16 recommendation for storage footprint.
+1. Implement safetensors loader for file or directory inputs.
+2. Infer `num_layers`/`num_experts` from tensor keys when not provided.
+3. Split base tensors into `base_model/*.safetensors`.
+4. Extract per-expert tensors into `experts/layer_XX_expert_YYY.safetensors` and write `registry.json`.
+5. Support both explicit expert keys and packed per-layer expert tensors.
+6. Add focused tests for end-to-end safetensors conversion.
