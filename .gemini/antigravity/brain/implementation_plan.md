@@ -1,7 +1,7 @@
 # Implementation Plan
 
 ## Goal
-Enable conversion from Q4-quantized GGUF MoE models by dequantizing tensors during conversion and preserving correct tensor orientation.
+Reduce conversion disk usage by supporting configurable output dtype and defaulting to float16 for dequantized tensors.
 
 ## Files to Modify
 - `convert/gguf_to_od_moe.py`
@@ -9,9 +9,8 @@ Enable conversion from Q4-quantized GGUF MoE models by dequantizing tensors duri
 - `README.md`
 
 ## Approach
-1. Use `gguf.quants.dequantize` for all tensor reads in converter.
-2. Align dequantized arrays to GGUF metadata shapes, including reversed-axis transpose handling.
-3. Keep packed expert extraction (`ffn_gate_exps`, `ffn_down_exps`, `ffn_up_exps`) and explicit expert extraction paths.
-4. Keep metadata auto-detection for `num_layers` and `num_experts`.
-5. Add tests for axis alignment and Q4 tensor dequantization path.
-6. Update README to remove now-obsolete "quantized not supported" note.
+1. Add `--output-dtype {float16,float32}` (default `float16`) to converter CLI.
+2. Thread output dtype through base and expert extraction paths.
+3. Cast dequantized tensors to selected dtype before writing safetensors.
+4. Add tests for `_read_tensor_data(..., output_dtype=...)` dtype behavior.
+5. Document float16 recommendation for storage footprint.

@@ -53,12 +53,15 @@ pip install -e .
 ```bash
 python -m mlx_od_moe.convert \
   --input models/Kimi-K2.5.gguf \
-  --output /Volumes/Storage/experts
+  --output /Volumes/Storage/experts \
+  --output-dtype float16
 ```
 
 This creates:
 - `/Volumes/Storage/experts/base_model/` (multiple base safetensors files)
 - `/Volumes/Storage/experts/experts/` (per-expert safetensors files)
+
+Use `--output-dtype float16` to reduce disk usage versus float32 during Q4 dequantizing conversion.
 
 #### 2. Run Inference Server
 

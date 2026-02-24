@@ -35,7 +35,7 @@ def _align_to_meta_shape(array: np.ndarray, meta_shape: tuple[int, ...], tensor_
     )
 
 
-def _read_tensor_data(tensor):
+def _read_tensor_data(tensor, output_dtype: np.dtype = np.float16):
     """
     Read tensor payload from GGUF.
 
@@ -45,7 +45,10 @@ def _read_tensor_data(tensor):
     qtype = gguf.GGMLQuantizationType(tensor.tensor_type)
     data = quants.dequantize(tensor.data, qtype)
     meta_shape = tuple(int(x) for x in tensor.shape)
-    return _align_to_meta_shape(data, meta_shape, tensor.name)
+    aligned = _align_to_meta_shape(data, meta_shape, tensor.name)
+    if aligned.dtype != output_dtype:
+        aligned = aligned.astype(output_dtype)
+    return aligned
 
 
 def parse_gguf_metadata(filepath: Path) -> Dict:
@@ -158,7 +161,11 @@ def parse_gguf_metadata(filepath: Path) -> Dict:
     }
 
 
-def extract_base_model(gguf_path: Path, output_dir: Path):
+def extract_base_model(
+    gguf_path: Path,
+    output_dir: Path,
+    output_dtype: np.dtype = np.float16,
+):
     """
     Extract base model components (embeddings, attention, norms).
 
@@ -182,7 +189,7 @@ def extract_base_model(gguf_path: Path, output_dir: Path):
     # Iterate through tensors with progress bar
     for tensor in tqdm(reader.tensors, desc="Reading tensors"):
         tensor_name = tensor.name
-        tensor_data = _read_tensor_data(tensor)
+        tensor_data = _read_tensor_data(tensor, output_dtype=output_dtype)
 
         # Categorize based on tensor name
         if "token_embd" in tensor_name:
@@ -198,6 +205,36 @@ def extract_base_model(gguf_path: Path, output_dir: Path):
         ):
             # Attention layers + router/gate (part of base model)
             attention_layers[tensor_name] = tensor_data
+
+    # Save categorized tensors as safetensors files
+    if embeddings:
+        save_file(embeddings, base_dir / "embeddings.safetensors")
+
+    if attention_layers:
+        save_file(attention_layers, base_dir / "attention_layers.safetensors")
+
+    if norms:
+        save_file(norms, base_dir / "norms.safetensors")
+
+    if lm_head:
+        save_file(lm_head, base_dir / "lm_head.safetensors")
+
+    # Save metadata.json
+    metadata = {
+        'extracted': True,
+        'output_dtype': str(np.dtype(output_dtype)),
+        'components': {
+            'embeddings': len(embeddings),
+            'attention_layers': len(attention_layers),
+            'norms': len(norms),
+            'lm_head': len(lm_head)
+        }
+    }
+
+    with open(base_dir / "metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"Base model extracted to {base_dir}")
 
 
 def _slice_packed_expert_tensor(tensor_data, expert_idx: int, num_experts: int):
@@ -224,6 +261,7 @@ def _extract_expert_tensors_for_layer(
     layer: int,
     expert: int,
     num_experts: int,
+    output_dtype: np.dtype = np.float16,
 ):
     """
     Extract one expert from either:
@@ -237,11 +275,17 @@ def _extract_expert_tensors_for_layer(
 
     expert_tensors = {}
     if w1_name in tensor_lookup:
-        expert_tensors["w1.weight"] = _read_tensor_data(tensor_lookup[w1_name])
+        expert_tensors["w1.weight"] = _read_tensor_data(
+            tensor_lookup[w1_name], output_dtype=output_dtype
+        )
     if w2_name in tensor_lookup:
-        expert_tensors["w2.weight"] = _read_tensor_data(tensor_lookup[w2_name])
+        expert_tensors["w2.weight"] = _read_tensor_data(
+            tensor_lookup[w2_name], output_dtype=output_dtype
+        )
     if w3_name in tensor_lookup:
-        expert_tensors["w3.weight"] = _read_tensor_data(tensor_lookup[w3_name])
+        expert_tensors["w3.weight"] = _read_tensor_data(
+            tensor_lookup[w3_name], output_dtype=output_dtype
+        )
     if expert_tensors:
         return expert_tensors
 
@@ -255,9 +299,9 @@ def _extract_expert_tensors_for_layer(
         and down_exps_name in tensor_lookup
         and up_exps_name in tensor_lookup
     ):
-        gate_exps = _read_tensor_data(tensor_lookup[gate_exps_name])
-        down_exps = _read_tensor_data(tensor_lookup[down_exps_name])
-        up_exps = _read_tensor_data(tensor_lookup[up_exps_name])
+        gate_exps = _read_tensor_data(tensor_lookup[gate_exps_name], output_dtype=output_dtype)
+        down_exps = _read_tensor_data(tensor_lookup[down_exps_name], output_dtype=output_dtype)
+        up_exps = _read_tensor_data(tensor_lookup[up_exps_name], output_dtype=output_dtype)
 
         # Runtime expects:
         # w1 = gate projection, w2 = down projection, w3 = up projection
@@ -269,37 +313,14 @@ def _extract_expert_tensors_for_layer(
 
     return {}
 
-    # Save categorized tensors as safetensors files
-    if embeddings:
-        save_file(embeddings, base_dir / "embeddings.safetensors")
 
-    if attention_layers:
-        save_file(attention_layers, base_dir / "attention_layers.safetensors")
-
-    if norms:
-        save_file(norms, base_dir / "norms.safetensors")
-
-    if lm_head:
-        save_file(lm_head, base_dir / "lm_head.safetensors")
-
-    # Save metadata.json
-    metadata = {
-        'extracted': True,
-        'components': {
-            'embeddings': len(embeddings),
-            'attention_layers': len(attention_layers),
-            'norms': len(norms),
-            'lm_head': len(lm_head)
-        }
-    }
-
-    with open(base_dir / "metadata.json", 'w') as f:
-        json.dump(metadata, f, indent=2)
-
-    print(f"Base model extracted to {base_dir}")
-
-
-def extract_experts(gguf_path: Path, output_dir: Path, num_layers: int = 28, num_experts: int = 384):
+def extract_experts(
+    gguf_path: Path,
+    output_dir: Path,
+    num_layers: int = 28,
+    num_experts: int = 384,
+    output_dtype: np.dtype = np.float16,
+):
     """
     Extract individual experts to separate safetensors files.
 
@@ -335,6 +356,7 @@ def extract_experts(gguf_path: Path, output_dir: Path, num_layers: int = 28, num
                     layer=layer,
                     expert=expert,
                     num_experts=num_experts,
+                    output_dtype=output_dtype,
                 )
 
                 # Save to safetensors
@@ -372,6 +394,7 @@ def convert_gguf_to_od_moe(
     output_dir: str,
     num_layers: int | None = None,
     num_experts: int | None = None,
+    output_dtype: str = "float16",
 ):
     """
     Full conversion: GGUF → OD-MoE format.
@@ -381,6 +404,7 @@ def convert_gguf_to_od_moe(
         output_dir: Output directory for experts + base model
         num_layers: Number of transformer layers (auto-detected if None)
         num_experts: Experts per layer (auto-detected if None)
+        output_dtype: Saved tensor dtype ("float16" or "float32")
     """
     input_file = Path(input_path)
     output_path = Path(output_dir)
@@ -392,6 +416,12 @@ def convert_gguf_to_od_moe(
     
     print(f"Converting {input_file.name}...")
     print(f"Output: {output_path}")
+    print(f"Output dtype: {output_dtype}")
+
+    dtype_map = {"float16": np.float16, "float32": np.float32}
+    if output_dtype not in dtype_map:
+        raise ValueError(f"Unsupported output dtype: {output_dtype}")
+    np_output_dtype = dtype_map[output_dtype]
     
     # Parse metadata
     metadata = parse_gguf_metadata(input_file)
@@ -405,10 +435,16 @@ def convert_gguf_to_od_moe(
         print(f"Auto-detected num_experts={num_experts}")
     
     # Extract base model
-    extract_base_model(input_file, output_path)
+    extract_base_model(input_file, output_path, output_dtype=np_output_dtype)
     
     # Extract experts
-    extract_experts(input_file, output_path, num_layers, num_experts)
+    extract_experts(
+        input_file,
+        output_path,
+        num_layers,
+        num_experts,
+        output_dtype=np_output_dtype,
+    )
     
     print("\n✅ Conversion complete!")
     print(f"   Base model: {output_path}/base_model/")
@@ -432,6 +468,12 @@ def main():
         default=None,
         help="Experts per layer (default: auto-detect from GGUF metadata)",
     )
+    parser.add_argument(
+        "--output-dtype",
+        choices=["float16", "float32"],
+        default="float16",
+        help="Output tensor dtype for saved safetensors (default: float16)",
+    )
     
     args = parser.parse_args()
     
@@ -439,7 +481,8 @@ def main():
         args.input,
         args.output,
         args.num_layers,
-        args.num_experts
+        args.num_experts,
+        args.output_dtype,
     )
 
 
