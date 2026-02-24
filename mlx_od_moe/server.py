@@ -145,7 +145,9 @@ def initialize_model(
     base_weights: str,
     gguf_experts: Optional[str] = None,
     tokenizer_path: Optional[str] = None,
-    cache_size_gb: int = 48,
+    cache_size_gb: int = 4,
+    enable_prefetch: bool = False,
+    predictor_path: Optional[str] = None,
 ):
     """Initialize model with OD-MoE."""
     global model
@@ -256,10 +258,17 @@ def initialize_model(
 
     # Setup OD-MoE
     try:
+        print(
+            "Runtime memory settings: "
+            f"cache_size_gb={cache_size_gb}, "
+            f"shadow_prefetch={'enabled' if enable_prefetch else 'disabled'}"
+        )
         model.setup_od_moe(
             expert_dir=expert_dir,
             gguf_expert_path=gguf_experts,
+            predictor_path=predictor_path,
             cache_size_gb=cache_size_gb,
+            enable_prefetch=enable_prefetch,
         )
     except FileNotFoundError:
         if gguf_experts:
@@ -400,11 +409,29 @@ def main():
     )
     parser.add_argument("--base-weights", required=True, help="Base model weights")
     parser.add_argument("--tokenizer", default=None, help="Tokenizer path or HF model ID")
-    parser.add_argument("--cache-size-gb", type=int, default=48, help="Cache size in GB")
+    parser.add_argument(
+        "--cache-size-gb",
+        type=int,
+        default=4,
+        help="Expert cache size in GB (set 0 for lowest memory mode)",
+    )
+    parser.add_argument(
+        "--enable-prefetch",
+        action="store_true",
+        help="Enable shadow-model expert prefetching (uses more memory)",
+    )
+    parser.add_argument(
+        "--predictor-path",
+        default=None,
+        help="Path to trained shadow predictor weights (implies --enable-prefetch)",
+    )
     parser.add_argument("--port", type=int, default=8080, help="Server port")
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
 
     args = parser.parse_args()
+    enable_prefetch = args.enable_prefetch or (args.predictor_path is not None)
+    if args.predictor_path and not args.enable_prefetch:
+        print("Predictor path provided; enabling shadow prefetch.")
 
     initialize_model(
         expert_dir=args.expert_dir,
@@ -412,6 +439,8 @@ def main():
         gguf_experts=args.gguf_experts,
         tokenizer_path=args.tokenizer,
         cache_size_gb=args.cache_size_gb,
+        enable_prefetch=enable_prefetch,
+        predictor_path=args.predictor_path,
     )
 
     print(f"Starting server on {args.host}:{args.port}")

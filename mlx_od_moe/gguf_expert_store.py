@@ -216,6 +216,14 @@ class GGUFOnDemandExpertStore:
 
     def _add_to_cache(self, key: str, weights: Dict[str, mx.array], size: int):
         with self.cache_lock:
+            # Explicit low-memory mode: do not retain experts in LRU.
+            if self.cache_size <= 0:
+                return
+
+            # If one expert exceeds the full cache budget, skip insertion.
+            if size > self.cache_size:
+                return
+
             while self.current_cache_bytes + size > self.cache_size and self.lru_cache:
                 oldest_key, oldest_weights = self.lru_cache.popitem(last=False)
                 evicted_size = self.cache_entry_sizes.pop(oldest_key, 0)

@@ -26,13 +26,15 @@ class ExpertPredictor(nn.Module):
         hidden_dim: int = 4096,       # Kimi-K2.5 hidden size
         num_experts: int = 384,        # Total experts per layer
         num_layers_ahead: int = 4,     # Lookahead window
-        predictor_dim: int = 1024      # Compressed representation
+        predictor_dim: int = 1024,     # Compressed representation
+        top_k: int = 8,
     ):
         super().__init__()
 
         self.hidden_dim = hidden_dim
         self.num_experts = num_experts
         self.num_layers_ahead = num_layers_ahead
+        self.top_k = max(1, min(top_k, num_experts))
 
         # Encoder: compress hidden states to smaller representation
         # Removed Dropout for faster inference
@@ -96,10 +98,10 @@ class ExpertPredictor(nn.Module):
             # For batch size 1 (inference), just use argmax
             if logits.shape[0] == 1:
                 # Shape: (top_k,)
-                top_k_indices = mx.argsort(logits[0], axis=-1)[-8:]
+                top_k_indices = mx.argsort(logits[0], axis=-1)[-self.top_k:]
             else:
                 # Shape: (batch, top_k)
-                top_k_indices = mx.argsort(logits, axis=-1)[:, -8:]
+                top_k_indices = mx.argsort(logits, axis=-1)[:, -self.top_k:]
 
             predictions.append(top_k_indices)
 
@@ -177,8 +179,18 @@ class ShadowRunner:
     Uses MLX async execution for non-blocking predictions.
     """
 
-    def __init__(self, predictor_path: Optional[str] = None):
-        self.predictor = ExpertPredictor()
+    def __init__(
+        self,
+        predictor_path: Optional[str] = None,
+        hidden_dim: int = 4096,
+        num_experts: int = 384,
+        top_k: int = 8,
+    ):
+        self.predictor = ExpertPredictor(
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
 
         if predictor_path:
             from pathlib import Path
