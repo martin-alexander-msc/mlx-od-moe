@@ -224,9 +224,15 @@ def _transpose_if_needed(tensor: Any, expected_shape: tuple[int, ...], source_ke
         return tensor
     if len(tensor_shape) == 2 and tensor_shape[::-1] == expected_shape:
         return tensor.T
+    hint = ""
+    if source_key.startswith("blk.") and ".attn_" in source_key:
+        hint = (
+            " This source attention tensor layout is incompatible with the current "
+            "OD-MoE GQA model implementation (likely MLA/variant attention)."
+        )
     raise ValueError(
         f"Shape mismatch for {source_key} -> {model_key}: got {tensor_shape}, "
-        f"expected {expected_shape}"
+        f"expected {expected_shape}.{hint}"
     )
 
 
