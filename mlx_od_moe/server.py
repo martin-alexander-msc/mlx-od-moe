@@ -116,6 +116,7 @@ def initialize_model(
     except Exception as e:
         raise RuntimeError(f"Failed to infer model config from converted weights: {e}")
 
+    print(f"Inferred config overrides: {overrides}")
     config = ODMoEConfig(**overrides)
     print(
         "Resolved config: "

@@ -70,9 +70,33 @@ def infer_config_overrides_from_base_shapes(base_weights: str) -> dict[str, int]
     if not layer_indices:
         raise ValueError("Could not infer number of layers from base weights")
 
+    layer0_attn_v = tensor_shapes.get("blk.0.attn_v.weight") or tensor_shapes.get(
+        "layers.0.attention.v_proj.weight"
+    )
+    layer0_attn_q = tensor_shapes.get("blk.0.attn_q.weight") or tensor_shapes.get(
+        "layers.0.attention.q_proj.weight"
+    )
+    if layer0_attn_v and len(layer0_attn_v) == 2:
+        # In both (hidden, kv_hidden) and (kv_hidden, hidden), hidden is the larger axis.
+        hidden_size = int(max(layer0_attn_v))
+    elif layer0_attn_q and len(layer0_attn_q) == 2:
+        hidden_size = int(max(layer0_attn_q))
+    else:
+        # Fallback for models without recognizable attention names.
+        hidden_size = int(min(emb_shape))
+
+    emb0, emb1 = int(emb_shape[0]), int(emb_shape[1])
+    if emb0 == hidden_size and emb1 != hidden_size:
+        vocab_size = emb1
+    elif emb1 == hidden_size and emb0 != hidden_size:
+        vocab_size = emb0
+    else:
+        # If ambiguous, assume the larger axis is vocab.
+        vocab_size = max(emb0, emb1)
+
     inferred = {
-        "vocab_size": int(emb_shape[0]),
-        "hidden_size": int(emb_shape[1]),
+        "vocab_size": int(vocab_size),
+        "hidden_size": int(hidden_size),
         "num_hidden_layers": max(layer_indices) + 1,
     }
     return inferred
