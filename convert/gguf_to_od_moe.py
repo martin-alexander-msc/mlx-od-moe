@@ -196,14 +196,14 @@ def extract_base_model(
             embeddings[tensor_name] = tensor_data
         elif tensor_name == "output.weight":
             lm_head[tensor_name] = tensor_data
-        elif "norm" in tensor_name and "experts" not in tensor_name:
+        elif "norm" in tensor_name and "_exps" not in tensor_name and ".experts." not in tensor_name:
             norms[tensor_name] = tensor_data
-        elif (
-            "attn" in tensor_name
-            or "ffn.gate" in tensor_name
-            or "ffn_gate_inp" in tensor_name
-        ):
-            # Attention layers + router/gate (part of base model)
+        elif "_exps" in tensor_name or ".experts." in tensor_name:
+            # Local routed experts are extracted separately into expert files.
+            continue
+        else:
+            # All other tensors are always-resident base tensors.
+            # This includes Qwen3Next SSM and shared-expert tensors.
             attention_layers[tensor_name] = tensor_data
 
     # Save categorized tensors as safetensors files

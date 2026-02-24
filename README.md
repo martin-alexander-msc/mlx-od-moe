@@ -76,17 +76,21 @@ To avoid generating huge `experts/` outputs, you can keep experts in GGUF and
 only extract base weights:
 
 ```bash
-python -m convert.gguf_to_od_moe \
+uv run python3 -m convert.gguf_to_od_moe \
   --input /path/to/model.gguf \
   --output /Volumes/Storage/experts \
   --output-dtype float16 \
   --base-only
 
-python -m mlx_od_moe.server \
+uv run python3 -m mlx_od_moe.server \
   --gguf-experts /path/to/model.gguf \
   --base-weights /Volumes/Storage/experts/base_model \
   --port 8080
 ```
+
+Important for Qwen3-Next models: if `base_model` was produced with an older
+converter version, re-run `--base-only`. Newer extraction includes required
+`ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.
 
 #### 3. Query the Model
 
