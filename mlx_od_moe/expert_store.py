@@ -139,6 +139,15 @@ class UnifiedMemoryExpertStore:
     def _add_to_cache(self, key: str, weights: Dict[str, mx.array], size: int):
         """Add to LRU cache with eviction"""
         with self.cache_lock:
+            # Explicit low-memory mode: never retain experts in LRU.
+            if self.cache_size <= 0:
+                return
+
+            # If a single expert cannot fit in the configured cache budget,
+            # keep it request-local and skip cache insertion.
+            if size > self.cache_size:
+                return
+
             # Evict until there's space
             while self.current_cache_bytes + size > self.cache_size and self.lru_cache:
                 oldest_key, oldest_weights = self.lru_cache.popitem(last=False)

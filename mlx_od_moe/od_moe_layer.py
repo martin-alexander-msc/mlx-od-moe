@@ -29,7 +29,8 @@ class ODMoELayer(nn.Module):
         num_experts: int = 384,
         top_k: int = 8,
         expert_store: Optional[UnifiedMemoryExpertStore] = None,
-        shadow_runner: Optional[ShadowRunner] = None
+        shadow_runner: Optional[ShadowRunner] = None,
+        retain_layer_experts: bool = False,
     ):
         super().__init__()
         
@@ -41,6 +42,7 @@ class ODMoELayer(nn.Module):
         
         self.expert_store = expert_store
         self.shadow_runner = shadow_runner
+        self.retain_layer_experts = retain_layer_experts
         
         # Router/gate (GGUF exports gate weights without bias)
         self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
@@ -75,6 +77,14 @@ class ODMoELayer(nn.Module):
             # Fallback: no expert store, use dummy weights
             return
         
+        current_top_k = set(expert_indices)
+
+        # Drop stale references first so peak memory does not hold
+        # (old working set + new working set) simultaneously.
+        for idx in list(self.active_experts.keys()):
+            if idx not in current_top_k:
+                del self.active_experts[idx]
+
         new_experts = {}
         for idx in expert_indices:
             # Skip if already in active set
@@ -107,12 +117,10 @@ class ODMoELayer(nn.Module):
         
         # Update active set
         self.active_experts.update(new_experts)
-        
-        # Cleanup: remove experts not in current top-k
-        current_top_k = set(expert_indices)
-        for idx in list(self.active_experts.keys()):
-            if idx not in current_top_k:
-                del self.active_experts[idx]
+
+    def clear_active_experts(self):
+        """Release per-layer strong references to expert tensors."""
+        self.active_experts.clear()
     
     def _compute_load_balancing_loss(
         self,
@@ -227,7 +235,7 @@ class ODMoELayer(nn.Module):
         self.aux_loss = self._compute_load_balancing_loss(router_probs, top_k_indices)
 
         # Determine unique experts needed for this batch
-        unique_experts = np.unique(top_k_indices.tolist()).tolist()
+        unique_experts = np.unique(np.asarray(top_k_indices)).tolist()
 
         # Load working set (this is the "OD" in OD-MoE)
         self.load_experts(unique_experts)
@@ -266,13 +274,24 @@ class ODMoELayer(nn.Module):
             output = output + expert_output * expert_weights_per_token[:, None]
 
         # Trigger prefetch for next layer
-        if self.shadow_runner and self.layer_idx < 27:
+        max_layer_idx = 27
+        if self.expert_store is not None and hasattr(self.expert_store, "num_layers"):
+            max_layer_idx = int(self.expert_store.num_layers) - 1
+        if self.shadow_runner and self.layer_idx < max_layer_idx:
             next_experts = self.shadow_runner.get_predictions_for_layer(self.layer_idx + 1)
             if self.expert_store:
                 self.expert_store.prefetch(self.layer_idx + 1, next_experts)
 
         # Reshape back
-        return output.reshape(batch, seq_len, hidden)
+        output = output.reshape(batch, seq_len, hidden)
+
+        # Keep layer working-set references ephemeral by default. Expert tensors
+        # remain available via expert_store cache; this avoids resident-memory
+        # growth when many unique experts are touched during prompt prefill.
+        if self.expert_store is not None and not self.retain_layer_experts:
+            self.clear_active_experts()
+
+        return output
 
     def get_expert_usage_stats(self) -> Dict:
         """

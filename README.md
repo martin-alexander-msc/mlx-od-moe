@@ -66,7 +66,7 @@ Use `--output-dtype float16` to reduce disk usage versus float32 during Q4 dequa
 #### 2. Run Inference Server
 
 ```bash
-python -m mlx_od_moe.server \
+uv run python3 -m mlx_od_moe.server \
   --expert-dir /Volumes/Storage/experts/experts \
   --base-weights /Volumes/Storage/experts/base_model \
   --port 8080
@@ -85,12 +85,18 @@ uv run python3 -m convert.gguf_to_od_moe \
 uv run python3 -m mlx_od_moe.server \
   --gguf-experts /path/to/model.gguf \
   --base-weights /Volumes/Storage/experts/base_model \
+  --cache-size-gb 4 \
   --port 8080
 ```
 
 Important for Qwen3-Next models: if `base_model` was produced with an older
 converter version, re-run `--base-only`. Newer extraction includes required
 `ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.
+
+Memory behavior defaults:
+- `--cache-size-gb` now defaults to `4` to prevent runaway expert residency.
+- Shadow prefetch is disabled by default. Enable it explicitly with
+  `--enable-prefetch` (and optionally `--predictor-path` for trained weights).
 
 #### 3. Query the Model
 
@@ -354,12 +360,22 @@ Currently supports models with standard Mixture-of-Experts architecture:
 
 ### 1. Optimize Cache Size
 
-```python
-# In config or as server argument
-expert_store = ExpertStore(
-    expert_dir="/path/to/experts",
-    max_cache_size=16  # Adjust based on available RAM
-)
+```bash
+# Low-memory baseline
+uv run python3 -m mlx_od_moe.server \
+  --gguf-experts /path/to/model.gguf \
+  --base-weights /path/to/base_model \
+  --cache-size-gb 2
+```
+
+```bash
+# Throughput mode (higher memory): enable prefetch with trained predictor
+uv run python3 -m mlx_od_moe.server \
+  --gguf-experts /path/to/model.gguf \
+  --base-weights /path/to/base_model \
+  --cache-size-gb 8 \
+  --enable-prefetch \
+  --predictor-path /path/to/shadow_model.safetensors
 ```
 
 **Rule of thumb:** 1-2 experts per GB of available RAM (after base model)
@@ -406,7 +422,7 @@ Tune `max_cache_size` based on observed hit rate vs available RAM.
 **Symptoms:** Crashes during inference, `mmap` errors
 
 **Solutions:**
-1. Reduce cache size: `--max-cache-size 8`
+1. Reduce cache size: `--cache-size-gb 2` (or `0` for minimum memory mode)
 2. Close other applications
 3. Use smaller model (e.g., Qwen2-57B instead of Kimi-K2.5)
 4. Upgrade to Mac with more RAM

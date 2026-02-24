@@ -1,9 +1,10 @@
 # Task
 
-User needs to run `qwen3-coder-next:q4_K_M` GGUF with limited disk.
+Stabilize runtime memory behavior for GGUF on-demand experts.
 
 Problem:
-- full expert conversion to fp16 produces ~150GiB outputs and exhausts disk.
+- resident memory grew to ~14GiB for tiny requests and up to ~40GiB for longer runs.
+- current defaults and retention behavior made the setup impractical on constrained machines.
 
 Requested outcome:
-- avoid full expert materialization while still running OD-MoE inference.
+- keep memory bounded and predictable so Qwen3-Next-Coder Q4_K_M is runnable locally.

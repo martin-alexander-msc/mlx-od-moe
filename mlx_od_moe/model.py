@@ -333,6 +333,7 @@ class KimiODMoEModel(nn.Module):
         gguf_expert_path: Optional[str] = None,
         predictor_path: Optional[str] = None,
         cache_size_gb: int = 48,
+        enable_prefetch: bool = False,
     ):
         """Initialize OD-MoE after base model weights are loaded."""
         print("Setting up OD-MoE...")
@@ -354,7 +355,17 @@ class KimiODMoEModel(nn.Module):
                 num_experts_per_layer=self.config.num_local_experts,
             )
 
-        self.shadow_runner = ShadowRunner(predictor_path)
+        if enable_prefetch:
+            self.shadow_runner = ShadowRunner(
+                predictor_path=predictor_path,
+                hidden_dim=self.config.hidden_size,
+                num_experts=self.config.num_local_experts,
+                top_k=self.config.num_experts_per_tok,
+            )
+            print("Shadow prefetch enabled")
+        else:
+            self.shadow_runner = None
+            print("Shadow prefetch disabled")
 
         for layer in self.layers:
             layer.moe = ODMoELayer(
