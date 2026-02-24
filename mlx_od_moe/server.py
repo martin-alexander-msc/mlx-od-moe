@@ -126,6 +126,7 @@ def initialize_model(
         shapes = inspect_base_weight_shapes(base_weights)
         q_shape = shapes.get("blk.0.attn_q.weight") or shapes.get("layers.0.attention.q_proj.weight")
         k_shape = shapes.get("blk.0.attn_k.weight") or shapes.get("layers.0.attention.k_proj.weight")
+        v_shape = shapes.get("blk.0.attn_v.weight") or shapes.get("layers.0.attention.v_proj.weight")
 
         hidden = int(overrides["hidden_size"])
 
@@ -140,7 +141,7 @@ def initialize_model(
             return max(a, b)
 
         q_out = _proj_out(q_shape)
-        k_out = _proj_out(k_shape)
+        k_out = _proj_out(k_shape) or _proj_out(v_shape)
 
         if q_out and k_out:
             head_dim = int(overrides["head_dim"]) if "head_dim" in overrides else None
@@ -155,17 +156,13 @@ def initialize_model(
                 else None
             )
 
-            if head_dim is not None:
-                if q_heads is None:
-                    if q_out % head_dim != 0:
-                        raise RuntimeError(f"q_out={q_out} is not divisible by head_dim={head_dim}")
-                    q_heads = q_out // head_dim
-                    overrides["num_attention_heads"] = q_heads
-                if kv_heads is None:
-                    if k_out % head_dim != 0:
-                        raise RuntimeError(f"k_out={k_out} is not divisible by head_dim={head_dim}")
-                    kv_heads = k_out // head_dim
-                    overrides["num_key_value_heads"] = kv_heads
+            # If rope/head_dim metadata is available, projection tensor widths are the source of truth.
+            # Some GGUFs expose head counts that do not match projection packing for this runtime.
+            if head_dim is not None and q_out % head_dim == 0 and k_out % head_dim == 0:
+                q_heads = q_out // head_dim
+                kv_heads = k_out // head_dim
+                overrides["num_attention_heads"] = q_heads
+                overrides["num_key_value_heads"] = kv_heads
 
             if q_heads is not None and kv_heads is not None:
                 if q_out % q_heads != 0 or k_out % kv_heads != 0:
@@ -182,6 +179,11 @@ def initialize_model(
                         f"q_head_dim={q_head_dim}, k_head_dim={k_head_dim}"
                     )
                 overrides["head_dim"] = q_head_dim
+                if q_heads % kv_heads != 0:
+                    raise RuntimeError(
+                        f"Invalid attention grouping inferred from base tensors: "
+                        f"num_attention_heads={q_heads}, num_key_value_heads={kv_heads}"
+                    )
             elif head_dim is None:
                 raise RuntimeError(
                     "Could not determine attention head configuration. "
