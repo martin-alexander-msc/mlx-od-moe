@@ -16,6 +16,7 @@ import re
 from .model import KimiODMoEModel, ODMoEConfig
 from .qwen3_next_od_model import Qwen3NextODMoEModel, Qwen3NextODConfig
 from .gguf_expert_store import infer_gguf_moe_metadata
+from .gguf_tokenizer import load_tokenizer_from_gguf
 from .weight_loader import (
     load_base_weight_items,
     infer_config_overrides_from_base_shapes,
@@ -41,6 +42,17 @@ def _load_tokenizer(tokenizer_path: str):
         print(f"Loaded tokenizer from {tokenizer_path}")
     except Exception as e:
         print(f"Warning: Could not load tokenizer ({e}). Using fallback encoding.")
+        tokenizer = None
+
+
+def _load_gguf_tokenizer(gguf_path: str):
+    """Load tokenizer directly from GGUF metadata."""
+    global tokenizer
+    try:
+        tokenizer = load_tokenizer_from_gguf(gguf_path)
+        print(f"Loaded tokenizer from GGUF metadata ({tokenizer.source})")
+    except Exception as e:
+        print(f"Warning: Could not load tokenizer from GGUF ({e}). Using fallback encoding.")
         tokenizer = None
 
 
@@ -303,6 +315,8 @@ def initialize_model(
     # Load tokenizer
     if tokenizer_path:
         _load_tokenizer(tokenizer_path)
+    elif gguf_experts:
+        _load_gguf_tokenizer(gguf_experts)
 
     print("Model initialized")
 

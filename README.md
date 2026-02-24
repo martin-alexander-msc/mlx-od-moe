@@ -88,6 +88,9 @@ uv run python3 -m mlx_od_moe.server \
   --port 8080
 ```
 
+In GGUF expert mode, tokenizer metadata is auto-loaded from the GGUF file when
+`--tokenizer` is omitted.
+
 Important for Qwen3-Next models: if `base_model` was produced with an older
 converter version, re-run `--base-only`. Newer extraction includes required
 `ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.
