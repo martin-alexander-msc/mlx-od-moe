@@ -72,6 +72,22 @@ python -m mlx_od_moe.server \
   --port 8080
 ```
 
+To avoid generating huge `experts/` outputs, you can keep experts in GGUF and
+only extract base weights:
+
+```bash
+python -m convert.gguf_to_od_moe \
+  --input /path/to/model.gguf \
+  --output /Volumes/Storage/experts \
+  --output-dtype float16 \
+  --base-only
+
+python -m mlx_od_moe.server \
+  --gguf-experts /path/to/model.gguf \
+  --base-weights /Volumes/Storage/experts/base_model \
+  --port 8080
+```
+
 #### 3. Query the Model
 
 ```bash

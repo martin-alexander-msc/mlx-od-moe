@@ -395,6 +395,8 @@ def convert_gguf_to_od_moe(
     num_layers: int | None = None,
     num_experts: int | None = None,
     output_dtype: str = "float16",
+    include_base: bool = True,
+    include_experts: bool = True,
 ):
     """
     Full conversion: GGUF → OD-MoE format.
@@ -405,6 +407,8 @@ def convert_gguf_to_od_moe(
         num_layers: Number of transformer layers (auto-detected if None)
         num_experts: Experts per layer (auto-detected if None)
         output_dtype: Saved tensor dtype ("float16" or "float32")
+        include_base: Whether to extract base_model/*
+        include_experts: Whether to extract experts/*
     """
     input_file = Path(input_path)
     output_path = Path(output_dir)
@@ -434,17 +438,17 @@ def convert_gguf_to_od_moe(
         num_experts = metadata.get("num_experts") or 384
         print(f"Auto-detected num_experts={num_experts}")
     
-    # Extract base model
-    extract_base_model(input_file, output_path, output_dtype=np_output_dtype)
-    
-    # Extract experts
-    extract_experts(
-        input_file,
-        output_path,
-        num_layers,
-        num_experts,
-        output_dtype=np_output_dtype,
-    )
+    if include_base:
+        extract_base_model(input_file, output_path, output_dtype=np_output_dtype)
+
+    if include_experts:
+        extract_experts(
+            input_file,
+            output_path,
+            num_layers,
+            num_experts,
+            output_dtype=np_output_dtype,
+        )
     
     print("\n✅ Conversion complete!")
     print(f"   Base model: {output_path}/base_model/")
@@ -474,15 +478,33 @@ def main():
         default="float16",
         help="Output tensor dtype for saved safetensors (default: float16)",
     )
+    parser.add_argument(
+        "--base-only",
+        action="store_true",
+        help="Extract only base_model/* outputs (skip experts)",
+    )
+    parser.add_argument(
+        "--experts-only",
+        action="store_true",
+        help="Extract only experts/* outputs (skip base model)",
+    )
     
     args = parser.parse_args()
     
+    if args.base_only and args.experts_only:
+        raise ValueError("Cannot use --base-only and --experts-only together")
+
+    include_base = not args.experts_only
+    include_experts = not args.base_only
+
     convert_gguf_to_od_moe(
         args.input,
         args.output,
         args.num_layers,
         args.num_experts,
         args.output_dtype,
+        include_base,
+        include_experts,
     )
 
 

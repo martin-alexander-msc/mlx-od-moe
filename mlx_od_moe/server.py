@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from .model import KimiODMoEModel, ODMoEConfig
+from .gguf_expert_store import infer_gguf_moe_metadata
 from .weight_loader import (
     load_base_weight_items,
     infer_config_overrides_from_base_shapes,
@@ -80,8 +81,9 @@ def _collect_model_weight_shapes(model: KimiODMoEModel) -> dict[str, tuple[int, 
 
 
 def initialize_model(
-    expert_dir: str,
+    expert_dir: Optional[str],
     base_weights: str,
+    gguf_experts: Optional[str] = None,
     tokenizer_path: Optional[str] = None,
     cache_size_gb: int = 48,
 ):
@@ -89,16 +91,28 @@ def initialize_model(
     global model
 
     print("Initializing OD-MoE model...")
-    try:
-        validate_expert_conversion(expert_dir)
-    except Exception as e:
-        raise RuntimeError(f"Invalid expert conversion in {expert_dir}: {e}")
+    if gguf_experts is None:
+        if not expert_dir:
+            raise RuntimeError("expert_dir is required unless --gguf-experts is provided")
+        try:
+            validate_expert_conversion(expert_dir)
+        except Exception as e:
+            raise RuntimeError(f"Invalid expert conversion in {expert_dir}: {e}")
 
     try:
         overrides = infer_config_overrides_from_base_shapes(base_weights)
-        inferred_experts = infer_num_local_experts(expert_dir)
-        if inferred_experts is not None:
-            overrides["num_local_experts"] = inferred_experts
+        if gguf_experts:
+            gguf_meta = infer_gguf_moe_metadata(gguf_experts)
+            if "num_local_experts" in gguf_meta:
+                overrides["num_local_experts"] = gguf_meta["num_local_experts"]
+            if "num_hidden_layers" in gguf_meta:
+                overrides["num_hidden_layers"] = gguf_meta["num_hidden_layers"]
+            if "intermediate_size" in gguf_meta:
+                overrides["intermediate_size"] = gguf_meta["intermediate_size"]
+        else:
+            inferred_experts = infer_num_local_experts(expert_dir)
+            if inferred_experts is not None:
+                overrides["num_local_experts"] = inferred_experts
     except Exception as e:
         raise RuntimeError(f"Failed to infer model config from converted weights: {e}")
 
@@ -112,11 +126,18 @@ def initialize_model(
 
     # Setup OD-MoE
     try:
-        model.setup_od_moe(expert_dir, cache_size_gb=cache_size_gb)
+        model.setup_od_moe(
+            expert_dir=expert_dir,
+            gguf_expert_path=gguf_experts,
+            cache_size_gb=cache_size_gb,
+        )
     except FileNotFoundError:
+        if gguf_experts:
+            raise FileNotFoundError(f"GGUF expert source not found: {gguf_experts}")
         raise FileNotFoundError(f"Expert directory not found: {expert_dir}")
     except Exception as e:
-        raise RuntimeError(f"Failed to setup OD-MoE from {expert_dir}: {e}")
+        source = gguf_experts if gguf_experts else expert_dir
+        raise RuntimeError(f"Failed to setup OD-MoE from {source}: {e}")
 
     # Load base weights (single safetensors file OR converted base_model directory)
     print(f"Loading base weights from {base_weights}...")
@@ -225,7 +246,12 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="mlx-od-moe server")
-    parser.add_argument("--expert-dir", required=True, help="Expert directory")
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--expert-dir", help="Converted expert directory")
+    source_group.add_argument(
+        "--gguf-experts",
+        help="Use GGUF file directly as expert source (avoids expert conversion output)",
+    )
     parser.add_argument("--base-weights", required=True, help="Base model weights")
     parser.add_argument("--tokenizer", default=None, help="Tokenizer path or HF model ID")
     parser.add_argument("--cache-size-gb", type=int, default=48, help="Cache size in GB")
@@ -234,7 +260,13 @@ def main():
 
     args = parser.parse_args()
 
-    initialize_model(args.expert_dir, args.base_weights, args.tokenizer, args.cache_size_gb)
+    initialize_model(
+        expert_dir=args.expert_dir,
+        base_weights=args.base_weights,
+        gguf_experts=args.gguf_experts,
+        tokenizer_path=args.tokenizer,
+        cache_size_gb=args.cache_size_gb,
+    )
 
     print(f"Starting server on {args.host}:{args.port}")
     app.run(host=args.host, port=args.port)

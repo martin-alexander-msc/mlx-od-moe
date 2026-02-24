@@ -20,6 +20,7 @@ from typing import Optional, List, Generator
 from pathlib import Path
 
 from .expert_store import UnifiedMemoryExpertStore
+from .gguf_expert_store import GGUFOnDemandExpertStore
 from .shadow_model import ShadowRunner
 from .od_moe_layer import ODMoELayer
 
@@ -311,19 +312,30 @@ class KimiODMoEModel(nn.Module):
 
     def setup_od_moe(
         self,
-        expert_dir: str,
+        expert_dir: Optional[str] = None,
+        gguf_expert_path: Optional[str] = None,
         predictor_path: Optional[str] = None,
         cache_size_gb: int = 48,
     ):
         """Initialize OD-MoE after base model weights are loaded."""
         print("Setting up OD-MoE...")
 
-        self.expert_store = UnifiedMemoryExpertStore(
-            expert_dir,
-            cache_size_gb=cache_size_gb,
-            num_layers=self.config.num_hidden_layers,
-            num_experts_per_layer=self.config.num_local_experts,
-        )
+        if gguf_expert_path:
+            self.expert_store = GGUFOnDemandExpertStore(
+                gguf_expert_path,
+                cache_size_gb=cache_size_gb,
+                num_layers=self.config.num_hidden_layers,
+                num_experts_per_layer=self.config.num_local_experts,
+            )
+        else:
+            if not expert_dir:
+                raise ValueError("expert_dir is required when gguf_expert_path is not set")
+            self.expert_store = UnifiedMemoryExpertStore(
+                expert_dir,
+                cache_size_gb=cache_size_gb,
+                num_layers=self.config.num_hidden_layers,
+                num_experts_per_layer=self.config.num_local_experts,
+            )
 
         self.shadow_runner = ShadowRunner(predictor_path)
 

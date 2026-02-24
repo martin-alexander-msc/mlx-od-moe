@@ -1,7 +1,9 @@
 # Task
 
-User ran out of disk converting Q4 GGUF because dequantized outputs were too large.
+User needs to run `qwen3-coder-next:q4_K_M` GGUF with limited disk.
+
+Problem:
+- full expert conversion to fp16 produces ~150GiB outputs and exhausts disk.
 
 Requested outcome:
-- support fp16 conversion output to reduce storage,
-- keep current conversion flow and runtime compatibility.
+- avoid full expert materialization while still running OD-MoE inference.
