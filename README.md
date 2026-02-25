@@ -95,9 +95,10 @@ For Qwen3-family GGUF models, the runtime now applies Qwen2-style
 pre-tokenization rules and uses GGUF tokenizer stop IDs (EOS/EOT metadata) to
 terminate generation, avoiding control-token garbage in outputs.
 
-For Qwen3-Next base weights, server preprocessing also applies the required
-RMSNorm-style `+1.0` shift on attention/post-attention/q_norm/k_norm and final
-`output_norm` tensors (matching `mlx_lm` sanitize behavior).
+For Qwen3-Next base weights, server preprocessing auto-detects whether
+attention/post-attention/q_norm/k_norm and `output_norm` tensors need an
+RMSNorm-style `+1.0` shift. If tensors are already in runtime scale, no shift
+is applied (prevents double-shifting and incoherent output).
 
 Qwen3-Next linear-attention fusion is also head-wise interleaved (`[q,k,v,z]`
 per key-head) when building `attn_qkvz`, matching MLX runtime expectations.

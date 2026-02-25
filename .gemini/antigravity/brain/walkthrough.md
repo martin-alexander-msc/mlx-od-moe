@@ -1,19 +1,12 @@
 # Walkthrough
 
-1. Added completion diagnostics in `server.py`:
-   - `debug_tokens` now returns prompt/generated token IDs and HEX values,
-   - response includes `stop_reason` + `stop_token_id`,
-   - `echo_prompt` support for non-stream responses.
-2. Added tokenizer provenance visibility:
-   - `tokenizer_source` tracked globally,
-   - included in `/health` and debug completion payloads.
-3. Hardened GGUF tokenizer loading in `gguf_tokenizer.py`:
-   - robust extraction of embedded `tokenizer.huggingface.json` across bytes,
-     uint8 arrays, and list forms,
-   - strict mode when HF JSON exists but tokenizer build fails.
-4. For Qwen3Next mode, server now requests strict GGUF tokenizer loading to
-   avoid silent tokenizer fallback when embedded HF JSON is unusable.
-5. Added tests:
-   - `tests/test_server_debug.py` for debug payload, HEX IDs, and echo behavior,
-   - `tests/test_gguf_tokenizer_utils.py` for tokenizer text coercion helper.
-6. Updated README docs for `debug_tokens` and `echo_prompt`.
+1. Updated `server.py` Qwen3Next preprocessing:
+   - kept head-wise `attn_qkvz` fusion logic unchanged,
+   - replaced unconditional norm `+1.0` shift with conditional detection using
+     observed norm stats (min/max/mean),
+   - added startup log output showing `shift_applied=true/false`.
+2. Added/updated preprocessing tests in `tests/test_server_preprocess.py`:
+   - verifies zero-centered norms are shifted,
+   - verifies already-shifted norms are preserved.
+3. Updated README to document automatic norm-shift detection for Qwen3Next
+   base preprocessing.

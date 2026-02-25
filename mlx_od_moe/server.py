@@ -195,19 +195,44 @@ def _preprocess_qwen3next_source_tensors(
         processed.pop(key, None)
         processed.pop(gate_key, None)
 
-    # Qwen3Next GGUF norm tensors for attention/post-attention/q_norm/k_norm and
-    # final output_norm are stored around a zero-centered baseline. MLX runtime
-    # expects these RMSNorm-style weights shifted by +1.0.
+    # Qwen3Next GGUF norm tensors may be exported in either:
+    # - zero-centered offset form (requires +1.0 shift), or
+    # - already shifted runtime form (must NOT be shifted again).
     norm_patterns = (
         re.compile(r"blk\.\d+\.attn_norm\.weight$"),
         re.compile(r"blk\.\d+\.post_attention_norm\.weight$"),
         re.compile(r"blk\.\d+\.attn_q_norm\.weight$"),
         re.compile(r"blk\.\d+\.attn_k_norm\.weight$"),
     )
-    for key, tensor in list(processed.items()):
-        if key == "output_norm.weight" or any(p.fullmatch(key) for p in norm_patterns):
-            if hasattr(tensor, "ndim") and int(tensor.ndim) == 1:
-                processed[key] = tensor + 1.0
+    norm_keys: list[str] = []
+    norm_stats: list[tuple[float, float, float]] = []
+    for key, tensor in processed.items():
+        if key != "output_norm.weight" and not any(p.fullmatch(key) for p in norm_patterns):
+            continue
+        if not (hasattr(tensor, "ndim") and int(tensor.ndim) == 1):
+            continue
+        t_min = float(mx.min(tensor).item())
+        t_max = float(mx.max(tensor).item())
+        t_mean = float(mx.mean(tensor).item())
+        norm_keys.append(key)
+        norm_stats.append((t_min, t_max, t_mean))
+
+    apply_norm_shift = False
+    if norm_stats:
+        global_min = min(s[0] for s in norm_stats)
+        global_max = max(s[1] for s in norm_stats)
+        global_mean = sum(s[2] for s in norm_stats) / len(norm_stats)
+        # Shift only when norms look like zero-centered offsets.
+        apply_norm_shift = (global_min < -0.05) or (global_mean < 0.5)
+        print(
+            "Qwen3Next norm preprocessing: "
+            f"count={len(norm_stats)}, min={global_min:.4f}, max={global_max:.4f}, "
+            f"mean={global_mean:.4f}, shift_applied={apply_norm_shift}"
+        )
+
+    if apply_norm_shift:
+        for key in norm_keys:
+            processed[key] = processed[key] + 1.0
 
     return processed
 
