@@ -74,6 +74,17 @@ def _detokenize(token_id: int) -> str:
     return chr(token_id) if 32 <= token_id < 127 else ""
 
 
+def _decode_token_sequence(token_ids: list[int]) -> str:
+    """Decode a full token sequence for tokenizer-consistent text rendering."""
+    if tokenizer is not None:
+        return tokenizer.decode(token_ids)
+    chars: list[str] = []
+    for token_id in token_ids:
+        if 32 <= token_id < 127:
+            chars.append(chr(token_id))
+    return "".join(chars)
+
+
 def _collect_model_weight_shapes(model: Any) -> dict[str, tuple[int, ...]]:
     """Flatten model.parameters() into {parameter_name: shape}."""
     shapes: dict[str, tuple[int, ...]] = {}
@@ -374,6 +385,8 @@ def completions():
 
     def generate_stream():
         nonlocal tokens_generated
+        generated_ids: list[int] = []
+        emitted_text = ""
 
         for token_id in model.generate(
             input_ids,
@@ -383,7 +396,17 @@ def completions():
             stop_token_ids=stop_token_ids,
         ):
             tokens_generated += 1
-            token_text = _detokenize(token_id)
+            generated_ids.append(int(token_id))
+
+            # Decode cumulatively and emit only the new suffix. This avoids
+            # per-token decode artifacts for byte-level BPE tokenizers.
+            full_text = _decode_token_sequence(generated_ids)
+            if full_text.startswith(emitted_text):
+                token_text = full_text[len(emitted_text) :]
+            else:
+                # Fallback for rare non-prefix decode behavior.
+                token_text = full_text
+            emitted_text = full_text
 
             yield f"data: {json.dumps({'token': token_text, 'token_id': token_id})}\n\n"
 
@@ -396,7 +419,7 @@ def completions():
     if stream:
         return Response(generate_stream(), mimetype="text/event-stream")
     else:
-        tokens = []
+        token_ids: list[int] = []
         for token_id in model.generate(
             input_ids,
             max_tokens,
@@ -404,9 +427,9 @@ def completions():
             top_p,
             stop_token_ids=stop_token_ids,
         ):
-            tokens.append(_detokenize(token_id))
+            token_ids.append(int(token_id))
         return jsonify(
-            {"completion": "".join(tokens), "tokens_generated": len(tokens)}
+            {"completion": _decode_token_sequence(token_ids), "tokens_generated": len(token_ids)}
         )
 
 
