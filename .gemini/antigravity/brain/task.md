@@ -1,12 +1,15 @@
 # Task
 
-Fix remaining Qwen3Next GGUF incoherent output after routing changes.
+Fix remaining Qwen3Next GGUF incoherent output after tokenizer, routing, and
+norm-shift fixes.
 
 Problem:
-- output remained semantically broken after tokenizer and routing fixes.
-- root cause identified: Qwen3Next norm tensors need a `+1.0` sanitize step
-  during base-weight preprocessing, matching `mlx_lm` behavior.
+- output remained semantically broken.
+- additional root cause identified: Qwen3Next linear-attention fusion
+  (`attn_qkv + attn_gate`) was concatenated as a flat append instead of
+  per-key-head `[q,k,v,z]` interleaving expected by
+  `Qwen3NextGatedDeltaNet.fix_query_key_value_ordering`.
 
 Requested outcome:
-- apply the missing norm shift in Qwen3Next preprocessing and add regression
-  coverage.
+- apply head-wise interleaving in qkvz fusion and add regression coverage for
+  ordering correctness.

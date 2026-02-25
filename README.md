@@ -99,6 +99,9 @@ For Qwen3-Next base weights, server preprocessing also applies the required
 RMSNorm-style `+1.0` shift on attention/post-attention/q_norm/k_norm and final
 `output_norm` tensors (matching `mlx_lm` sanitize behavior).
 
+Qwen3-Next linear-attention fusion is also head-wise interleaved (`[q,k,v,z]`
+per key-head) when building `attn_qkvz`, matching MLX runtime expectations.
+
 Important for Qwen3-Next models: if `base_model` was produced with an older
 converter version, re-run `--base-only`. Newer extraction includes required
 `ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.

@@ -132,10 +132,16 @@ def _validate_qwen3next_base_shapes(base_shapes: dict[str, tuple[int, ...]]) -> 
         )
 
 
-def _preprocess_qwen3next_source_tensors(source_dict: dict[str, Any]) -> dict[str, Any]:
+def _preprocess_qwen3next_source_tensors(
+    source_dict: dict[str, Any],
+    linear_num_key_heads: int | None = None,
+) -> dict[str, Any]:
     """
     Build fused Qwen3Next linear-attention qkvz projection tensor:
     blk.N.attn_qkv.weight + blk.N.attn_gate.weight -> blk.N.attn_qkvz.weight
+
+    The fused tensor must be interleaved per key-head as [q, k, v, z] chunks,
+    matching Qwen3NextGatedDeltaNet.fix_query_key_value_ordering().
     """
     processed = dict(source_dict)
     pattern = re.compile(r"blk\.(\d+)\.attn_qkv\.weight$")
@@ -157,7 +163,24 @@ def _preprocess_qwen3next_source_tensors(source_dict: dict[str, Any]) -> dict[st
                 f"qkv.shape={qkv.shape}, gate.shape={gate.shape}"
             )
 
-        processed[f"blk.{layer}.attn_qkvz.weight"] = mx.concatenate([qkv, gate], axis=1)
+        if linear_num_key_heads is not None:
+            if linear_num_key_heads <= 0:
+                raise RuntimeError(f"Invalid linear_num_key_heads={linear_num_key_heads}")
+            if (qkv.shape[1] % linear_num_key_heads) != 0 or (gate.shape[1] % linear_num_key_heads) != 0:
+                raise RuntimeError(
+                    f"Cannot interleave Qwen3Next qkv/gate for layer {layer}: "
+                    f"qkv.shape[1]={qkv.shape[1]}, gate.shape[1]={gate.shape[1]}, "
+                    f"linear_num_key_heads={linear_num_key_heads}"
+                )
+            qkv_chunk = qkv.shape[1] // linear_num_key_heads
+            gate_chunk = gate.shape[1] // linear_num_key_heads
+            qkv_by_head = qkv.reshape(qkv.shape[0], linear_num_key_heads, qkv_chunk)
+            gate_by_head = gate.reshape(gate.shape[0], linear_num_key_heads, gate_chunk)
+            fused = mx.concatenate([qkv_by_head, gate_by_head], axis=-1)
+            processed[f"blk.{layer}.attn_qkvz.weight"] = fused.reshape(qkv.shape[0], -1)
+        else:
+            # Conservative fallback for older flows where head count is unavailable.
+            processed[f"blk.{layer}.attn_qkvz.weight"] = mx.concatenate([qkv, gate], axis=1)
         processed.pop(key, None)
         processed.pop(gate_key, None)
 
@@ -285,7 +308,10 @@ def initialize_model(
         )
         model = Qwen3NextODMoEModel(config)
         map_key_fn = map_qwen3next_key_to_model_key
-        preprocess_fn = _preprocess_qwen3next_source_tensors
+        preprocess_fn = lambda source: _preprocess_qwen3next_source_tensors(
+            source,
+            linear_num_key_heads=config.linear_num_key_heads,
+        )
     else:
         # Legacy GQA-only ODMoE path.
         print(f"Inferred config overrides: {overrides}")
