@@ -28,6 +28,7 @@ class ODMoELayer(nn.Module):
         ffn_dim: int = 14336,
         num_experts: int = 384,
         top_k: int = 8,
+        norm_topk_prob: bool = True,
         expert_store: Optional[UnifiedMemoryExpertStore] = None,
         shadow_runner: Optional[ShadowRunner] = None
     ):
@@ -38,6 +39,7 @@ class ODMoELayer(nn.Module):
         self.ffn_dim = ffn_dim
         self.num_experts = num_experts
         self.top_k = top_k
+        self.norm_topk_prob = norm_topk_prob
         
         self.expert_store = expert_store
         self.shadow_runner = shadow_runner
@@ -185,6 +187,31 @@ class ODMoELayer(nn.Module):
         output = intermediate @ w2
 
         return output
+
+    def _route_experts(self, x_flat: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        """
+        Compute router probabilities and top-k expert assignments.
+
+        Matches Qwen3Next routing semantics:
+        - precise softmax
+        - top-k selection from probabilities
+        - optional top-k probability renormalization
+        """
+        router_logits = self.gate(x_flat)
+        if not bool(mx.all(mx.isfinite(router_logits)).item()):
+            raise ValueError("Router logits contain non-finite values")
+
+        router_probs = mx.softmax(router_logits, axis=-1, precise=True)
+        top_k_indices = mx.argpartition(router_probs, kth=-self.top_k, axis=-1)[:, -self.top_k:]
+        top_k_weights = mx.take_along_axis(router_probs, top_k_indices, axis=-1)
+
+        if self.norm_topk_prob:
+            top_k_weights = top_k_weights / mx.maximum(
+                mx.sum(top_k_weights, axis=-1, keepdims=True),
+                1e-9,
+            )
+
+        return top_k_indices, router_probs, top_k_weights
     
     def __call__(self, x: mx.array) -> mx.array:
         """
@@ -209,19 +236,8 @@ class ODMoELayer(nn.Module):
         x_flat = x.reshape(-1, hidden)  # (batch*seq, hidden)
         num_tokens = x_flat.shape[0]
 
-        # Router logits
-        router_logits = self.gate(x_flat)  # (batch*seq, num_experts)
-
-        # Select top-k experts per token
-        top_k_indices = mx.argsort(router_logits, axis=-1)[:, -self.top_k:]
-        router_probs = mx.softmax(router_logits, axis=-1)
-
-        # Gather top-k weights for selected experts
-        # Shape: (num_tokens, top_k)
-        top_k_weights = mx.take_along_axis(router_probs, top_k_indices, axis=-1)
-
-        # Normalize top-k weights to sum to 1
-        top_k_weights = top_k_weights / mx.sum(top_k_weights, axis=-1, keepdims=True)
+        # Compute router probs and top-k assignments.
+        top_k_indices, router_probs, top_k_weights = self._route_experts(x_flat)
 
         # Compute load balancing auxiliary loss
         self.aux_loss = self._compute_load_balancing_loss(router_probs, top_k_indices)

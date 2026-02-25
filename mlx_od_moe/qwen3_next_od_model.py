@@ -100,6 +100,7 @@ class Qwen3NextODSparseMoeBlock(nn.Module):
             ffn_dim=config.moe_intermediate_size,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
+            norm_topk_prob=config.norm_topk_prob,
             expert_store=expert_store,
             shadow_runner=shadow_runner,
         )

@@ -1,21 +1,22 @@
 # Implementation Plan
 
 ## Goal
-Make Qwen3 GGUF decoding coherent by matching tokenizer behavior and stop-token logic.
+Match Qwen3Next MoE routing behavior in OD runtime to improve generation quality.
 
 ## Files to Modify
-- `mlx_od_moe/server.py`
-- `mlx_od_moe/gguf_tokenizer.py`
-- `mlx_od_moe/model.py`
+- `mlx_od_moe/od_moe_layer.py`
 - `mlx_od_moe/qwen3_next_od_model.py`
-- `README.md`
+- `tests/test_od_moe_layer.py`
 
 ## Approach
-1. Extend GGUF tokenizer loader with Qwen2-style pretokenization when
-   `tokenizer.ggml.pre=qwen2`.
-2. Register GGUF control tokens as tokenizer special tokens so chat markers are
-   encoded as single IDs.
-3. Parse GGUF special-token metadata (EOS/EOT/EOM/PAD) and derive stop IDs.
-4. Propagate EOS override and stop IDs through server and generation loops.
-5. Update both model `generate()` methods to support multiple stop IDs.
-6. Document Qwen3-specific behavior in README.
+1. Add a routing helper in `ODMoELayer` that:
+   - validates finite router logits,
+   - computes router probs with `mx.softmax(..., precise=True)`,
+   - selects top-k experts from probabilities via `argpartition`,
+   - conditionally normalizes top-k scores when `norm_topk_prob=True`.
+2. Wire `Qwen3NextODConfig.norm_topk_prob` into `ODMoELayer`.
+3. Add router-focused tests for:
+   - normalization toggle behavior,
+   - non-finite logits guard.
+4. Run available validation commands and document test limitations if pytest is
+   not present in the environment.

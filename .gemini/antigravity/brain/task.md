@@ -1,13 +1,13 @@
 # Task
 
-Fix Qwen3 GGUF output quality after tokenizer autoload.
+Align Qwen3Next OD-MoE routing behavior with Qwen3 reference semantics.
 
 Problem:
-- tokenizer autoload made text non-empty, but responses were still garbled and
-  included control-token artifacts.
-- Qwen3 GGUF uses `tokenizer.ggml.pre=qwen2` and GGUF stop IDs that were not
-  fully respected in runtime generation.
+- tokenizer and stop-token fixes improved outputs but generations remained
+  incoherent.
+- MoE routing in `ODMoELayer` used logits-based top-k with always-on
+  renormalization, which diverged from Qwen3Next routing semantics.
 
 Requested outcome:
-- apply correct Qwen2-style pretokenization and stop generation on GGUF EOS/EOT
-  metadata so completions are coherent.
+- switch OD routing to precise probability-based top-k, make top-k
+  renormalization configurable via `norm_topk_prob`, and add guardrails/tests.

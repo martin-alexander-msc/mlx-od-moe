@@ -1,17 +1,23 @@
 # Walkthrough
 
-1. Verified Qwen3 GGUF tokenizer metadata and IDs:
-   - `tokenizer.ggml.pre=qwen2`
-   - `tokenizer.ggml.eos_token_id=151645`
-   - `tokenizer.ggml.eos_token_ids=[151645, 151643]` with pad filtering.
-2. Extended `gguf_tokenizer.py`:
-   - added Qwen2 pretokenization (`Split(regex) + ByteLevel(use_regex=False)`),
-   - registered CONTROL tokens as special tokens,
-   - added GGUF special-token/stop-id inference helper.
-3. Updated server config flow:
-   - apply GGUF EOS override into model config,
-   - derive and log resolved stop IDs,
-   - pass stop IDs into generation calls.
-4. Updated both model generate loops to stop on any token in `stop_token_ids`
-   (EOS/EOT set), not only a single default ID.
-5. Updated README with Qwen3-specific tokenizer/stop-token behavior notes.
+1. Investigated suspected expert-axis mismatch by comparing runtime GGUF slice
+   dequantization against full-tensor dequantization for Qwen3Next packed expert
+   tensors.
+   - Result: runtime slicing was correct for gate/up/down packed tensors.
+2. Verified converted base tensor payloads matched source GGUF exactly for key
+   attention/SSM/shared-expert tensors to rule out base/expert mismatch.
+3. Implemented routing alignment in `ODMoELayer`:
+   - introduced `_route_experts`,
+   - switched to `softmax(..., precise=True)`,
+   - selected top-k from probabilities via `argpartition`,
+   - made top-k renormalization configurable with `norm_topk_prob`,
+   - added non-finite router-logit validation.
+4. Wired `Qwen3NextODConfig.norm_topk_prob` into `ODMoELayer` construction.
+5. Added unit tests covering:
+   - top-k normalization toggle behavior,
+   - rejection of non-finite router logits.
+6. Validation:
+   - `py_compile` passed for modified files,
+   - direct runtime sanity check confirmed normalized vs raw top-k score sums.
+   - full pytest execution is currently blocked in this environment because
+     `pytest` is not installed in `.venv`.

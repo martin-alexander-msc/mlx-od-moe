@@ -203,6 +203,60 @@ class TestRouter:
         assert layer.aux_loss >= 0, "Aux loss should be non-negative"
         assert layer.aux_loss < 10.0, "Aux loss should be bounded"
 
+    def test_topk_weight_normalization_toggle(self):
+        """Top-k score renormalization should be optional."""
+
+        class FixedGate:
+            def __call__(self, x):
+                return mx.array([[4.0, 2.0, 1.0, -1.0]])
+
+        x_flat = mx.zeros((1, 4))
+
+        layer_norm = ODMoELayer(
+            layer_idx=0,
+            hidden_dim=4,
+            ffn_dim=8,
+            num_experts=4,
+            top_k=2,
+            norm_topk_prob=True,
+        )
+        layer_norm.gate = FixedGate()
+        _, _, topk_norm = layer_norm._route_experts(x_flat)
+        topk_norm_sum = float(mx.sum(topk_norm, axis=-1).item())
+        assert abs(topk_norm_sum - 1.0) < 1e-6
+
+        layer_raw = ODMoELayer(
+            layer_idx=0,
+            hidden_dim=4,
+            ffn_dim=8,
+            num_experts=4,
+            top_k=2,
+            norm_topk_prob=False,
+        )
+        layer_raw.gate = FixedGate()
+        _, _, topk_raw = layer_raw._route_experts(x_flat)
+        topk_raw_sum = float(mx.sum(topk_raw, axis=-1).item())
+        assert topk_raw_sum < 1.0
+
+    def test_route_experts_rejects_non_finite_logits(self):
+        """Router should fail fast on NaN/Inf logits."""
+
+        class BadGate:
+            def __call__(self, x):
+                return mx.array([[0.0, float("nan"), 1.0, 2.0]])
+
+        layer = ODMoELayer(
+            layer_idx=0,
+            hidden_dim=4,
+            ffn_dim=8,
+            num_experts=4,
+            top_k=2,
+        )
+        layer.gate = BadGate()
+
+        with pytest.raises(ValueError, match="non-finite"):
+            layer._route_experts(mx.zeros((1, 4)))
+
 
 class TestPrefetch:
     """Test suite for shadow model prefetch integration."""
