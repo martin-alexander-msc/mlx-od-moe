@@ -117,6 +117,12 @@ curl -X POST http://localhost:8080/generate \
   }'
 ```
 
+Debugging options for `/v1/completions`:
+- `debug_tokens: true` adds `prompt_token_ids`, `generated_token_ids`, and
+  hex-formatted IDs to the response.
+- `echo_prompt: true` prepends the original prompt to `completion`.
+  Default is `false`, so `completion` contains generated text only.
+
 ## Architecture
 
 ### System Design

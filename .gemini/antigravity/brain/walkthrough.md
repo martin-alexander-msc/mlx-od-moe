@@ -1,27 +1,19 @@
 # Walkthrough
 
-1. Investigated remaining incoherent outputs after prior tokenizer/routing/norm
-   fixes.
-2. Identified mismatch in linear-attention fusion ordering:
-   `attn_qkv + attn_gate` was appended flat, while
-   `Qwen3NextGatedDeltaNet.fix_query_key_value_ordering()` expects per-key-head
-   `[q,k,v,z]` chunk layout.
-3. Updated `_preprocess_qwen3next_source_tensors()` in `server.py` to:
-   - interleave qkv/gate chunks per `linear_num_key_heads`,
-   - pass `linear_num_key_heads` from resolved Qwen3Next config,
-   - keep prior norm sanitize shift behavior.
-4. Norm sanitize shift remains applied as `+1.0` for:
-   - `blk.*.attn_norm.weight`
-   - `blk.*.post_attention_norm.weight`
-   - `blk.*.attn_q_norm.weight`
-   - `blk.*.attn_k_norm.weight`
-   - `output_norm.weight`
-5. Extended regression test `tests/test_server_preprocess.py` to verify:
-   - interleaved qkvz ordering on deterministic data,
-   - norm-shift behavior,
-   - unchanged non-target tensors.
-6. Validation:
-   - `uv run python3 -m py_compile mlx_od_moe/server.py tests/test_server_preprocess.py`
-   - direct runtime sanity scripts confirmed:
-     - norm means shift as expected (`0.0->1.0`, `0.5->1.5`, etc.),
-     - real layer-0 fusion now interleaves gate chunk within each head block.
+1. Added completion diagnostics in `server.py`:
+   - `debug_tokens` now returns prompt/generated token IDs and HEX values,
+   - response includes `stop_reason` + `stop_token_id`,
+   - `echo_prompt` support for non-stream responses.
+2. Added tokenizer provenance visibility:
+   - `tokenizer_source` tracked globally,
+   - included in `/health` and debug completion payloads.
+3. Hardened GGUF tokenizer loading in `gguf_tokenizer.py`:
+   - robust extraction of embedded `tokenizer.huggingface.json` across bytes,
+     uint8 arrays, and list forms,
+   - strict mode when HF JSON exists but tokenizer build fails.
+4. For Qwen3Next mode, server now requests strict GGUF tokenizer loading to
+   avoid silent tokenizer fallback when embedded HF JSON is unusable.
+5. Added tests:
+   - `tests/test_server_debug.py` for debug payload, HEX IDs, and echo behavior,
+   - `tests/test_gguf_tokenizer_utils.py` for tokenizer text coercion helper.
+6. Updated README docs for `debug_tokens` and `echo_prompt`.

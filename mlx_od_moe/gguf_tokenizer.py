@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 import json
 
 import gguf
+import numpy as np
 
 
 QWEN2_PRETOKENIZE_REGEX = (
@@ -53,6 +54,77 @@ def _field_contents(reader: gguf.GGUFReader, key: str, default: Any = None) -> A
         return field.contents()
     except Exception:
         return default
+
+
+def _to_utf8_text(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return None
+    if isinstance(value, np.ndarray):
+        if value.dtype == np.uint8:
+            try:
+                return value.tobytes().decode("utf-8")
+            except Exception:
+                return None
+        if value.ndim == 1 and np.issubdtype(value.dtype, np.integer):
+            try:
+                return bytes(int(x) & 0xFF for x in value.tolist()).decode("utf-8")
+            except Exception:
+                return None
+    if isinstance(value, list):
+        if value and all(isinstance(x, int) and 0 <= x <= 255 for x in value):
+            try:
+                return bytes(value).decode("utf-8")
+            except Exception:
+                return None
+        if value and all(isinstance(x, str) for x in value):
+            return "".join(value)
+    return None
+
+
+def _field_text(reader: gguf.GGUFReader, key: str) -> Optional[str]:
+    field = reader.fields.get(key)
+    if field is None:
+        return None
+
+    text = _to_utf8_text(_field_contents(reader, key, default=None))
+    if text is not None and text.strip():
+        return text
+
+    parts = getattr(field, "parts", None)
+    if parts is None:
+        return None
+
+    joined_bytes = bytearray()
+    saw_bytes = False
+    for part in parts:
+        text = _to_utf8_text(part)
+        if text is not None and text.strip():
+            return text
+        if isinstance(part, bytes):
+            joined_bytes.extend(part)
+            saw_bytes = True
+        elif isinstance(part, np.ndarray) and part.dtype == np.uint8:
+            joined_bytes.extend(part.tobytes())
+            saw_bytes = True
+        elif isinstance(part, list) and part and all(
+            isinstance(x, int) and 0 <= x <= 255 for x in part
+        ):
+            joined_bytes.extend(part)
+            saw_bytes = True
+
+    if saw_bytes:
+        try:
+            decoded = bytes(joined_bytes).decode("utf-8")
+            if decoded.strip():
+                return decoded
+        except Exception:
+            pass
+    return None
 
 
 def _load_hf_tokenizer_from_gguf_json(
@@ -250,7 +322,11 @@ def infer_gguf_special_token_ids(gguf_path: str) -> dict[str, Any]:
     }
 
 
-def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
+def load_tokenizer_from_gguf(
+    gguf_path: str,
+    *,
+    strict_hf_json: bool = False,
+) -> GGUFTokenizer:
     """
     Build a tokenizer directly from GGUF metadata.
 
@@ -266,8 +342,8 @@ def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
     special_token_ids = infer_gguf_special_token_ids(gguf_path)
     stop_token_ids = special_token_ids.get("stop_token_ids", [])
 
-    hf_json = _field_contents(reader, "tokenizer.huggingface.json")
-    if isinstance(hf_json, str) and hf_json.strip():
+    hf_json = _field_text(reader, "tokenizer.huggingface.json")
+    if hf_json is not None and hf_json.strip():
         tok = _load_hf_tokenizer_from_gguf_json(
             hf_json,
             f"gguf:{gguf_path}:hf_json",
@@ -276,8 +352,19 @@ def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
         )
         if tok is not None:
             return tok
-        # validate early for debugging when field exists but malformed
-        json.loads(hf_json)
+
+        # Validate early for debugging when field exists but tokenizer init fails.
+        try:
+            json.loads(hf_json)
+        except Exception as e:
+            raise RuntimeError(
+                "Found tokenizer.huggingface.json in GGUF, but failed to parse it as JSON"
+            ) from e
+        if strict_hf_json:
+            raise RuntimeError(
+                "Found tokenizer.huggingface.json in GGUF, but failed to build tokenizer "
+                "from it. Refusing fallback in strict mode."
+            )
 
     tok = _load_gpt2_bpe_tokenizer_from_gguf(
         reader,

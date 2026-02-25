@@ -30,41 +30,48 @@ from .weight_loader import (
 app = Flask(__name__)
 model: Optional[Any] = None
 tokenizer = None
+tokenizer_source: Optional[str] = None
 stop_token_ids: list[int] = []
 
 
 def _load_tokenizer(tokenizer_path: str):
     """Load tokenizer from model directory."""
-    global tokenizer
+    global tokenizer, tokenizer_source
     try:
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        tokenizer_source = f"hf:{tokenizer_path}"
         print(f"Loaded tokenizer from {tokenizer_path}")
     except Exception as e:
         print(f"Warning: Could not load tokenizer ({e}). Using fallback encoding.")
         tokenizer = None
+        tokenizer_source = None
 
 
-def _load_gguf_tokenizer(gguf_path: str):
+def _load_gguf_tokenizer(gguf_path: str, strict_hf_json: bool = False):
     """Load tokenizer directly from GGUF metadata."""
-    global tokenizer
+    global tokenizer, tokenizer_source
     try:
-        tokenizer = load_tokenizer_from_gguf(gguf_path)
+        tokenizer = load_tokenizer_from_gguf(gguf_path, strict_hf_json=strict_hf_json)
+        tokenizer_source = tokenizer.source
         print(f"Loaded tokenizer from GGUF metadata ({tokenizer.source})")
     except Exception as e:
         print(f"Warning: Could not load tokenizer from GGUF ({e}). Using fallback encoding.")
         tokenizer = None
+        tokenizer_source = None
+
+
+def _encode_to_token_ids(text: str) -> list[int]:
+    """Tokenize text to token IDs."""
+    if tokenizer is not None:
+        return [int(i) for i in tokenizer.encode(text, return_tensors=None)]
+    # Fallback: encode as UTF-8 byte values (limited but functional)
+    return [int(i) for i in text.encode("utf-8")]
 
 
 def _tokenize(text: str) -> mx.array:
-    """Tokenize text to token IDs."""
-    if tokenizer is not None:
-        ids = tokenizer.encode(text, return_tensors=None)
-        return mx.array([ids])
-    # Fallback: encode as UTF-8 byte values (limited but functional)
-    ids = list(text.encode("utf-8"))
-    return mx.array([ids])
+    return mx.array([_encode_to_token_ids(text)])
 
 
 def _detokenize(token_id: int) -> str:
@@ -83,6 +90,10 @@ def _decode_token_sequence(token_ids: list[int]) -> str:
         if 32 <= token_id < 127:
             chars.append(chr(token_id))
     return "".join(chars)
+
+
+def _token_ids_hex(token_ids: list[int]) -> list[str]:
+    return [f"0x{int(token_id):x}" for token_id in token_ids]
 
 
 def _collect_model_weight_shapes(model: Any) -> dict[str, tuple[int, ...]]:
@@ -373,7 +384,9 @@ def initialize_model(
     if tokenizer_path:
         _load_tokenizer(tokenizer_path)
     elif gguf_experts:
-        _load_gguf_tokenizer(gguf_experts)
+        # For Qwen3Next, reject silent fallback when an embedded HF tokenizer JSON
+        # is present but malformed/unusable.
+        _load_gguf_tokenizer(gguf_experts, strict_hf_json=qwen3next_mode)
 
     if gguf_experts:
         stop_token_ids = [int(t) for t in gguf_tok_meta.get("stop_token_ids", [])]
@@ -414,11 +427,14 @@ def completions():
     temperature = data.get("temperature", 0.6)
     top_p = data.get("top_p", 0.9)
     stream = data.get("stream", True)
+    debug_tokens = bool(data.get("debug_tokens", False))
+    echo_prompt = bool(data.get("echo_prompt", False))
 
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    input_ids = _tokenize(prompt)
+    prompt_token_ids = _encode_to_token_ids(prompt)
+    input_ids = mx.array([prompt_token_ids])
 
     start_time = time.time()
     tokens_generated = 0
@@ -427,6 +443,9 @@ def completions():
         nonlocal tokens_generated
         generated_ids: list[int] = []
         emitted_text = ""
+        if echo_prompt:
+            emitted_text = prompt
+            yield f"data: {json.dumps({'token': prompt, 'token_id': None})}\n\n"
 
         for token_id in model.generate(
             input_ids,
@@ -453,8 +472,31 @@ def completions():
         # Send completion stats
         total_time = time.time() - start_time
         stats = model.expert_store.get_stats() if model.expert_store else {}
+        stop_token_id = int(generated_ids[-1]) if generated_ids else None
+        stop_reason = (
+            "stop_token" if stop_token_id is not None and stop_token_id in stop_token_ids else "max_tokens"
+        )
+        done_payload = {
+            "done": True,
+            "tokens_generated": tokens_generated,
+            "time_seconds": round(total_time, 3),
+            "tokens_per_second": round(tokens_generated / total_time, 1) if total_time > 0 else 0,
+            "cache_stats": stats,
+            "stop_reason": stop_reason,
+            "stop_token_id": stop_token_id,
+        }
+        if debug_tokens:
+            done_payload.update(
+                {
+                    "prompt_token_ids": prompt_token_ids,
+                    "prompt_token_ids_hex": _token_ids_hex(prompt_token_ids),
+                    "generated_token_ids": [int(t) for t in generated_ids],
+                    "generated_token_ids_hex": _token_ids_hex(generated_ids),
+                    "tokenizer_source": tokenizer_source,
+                }
+            )
 
-        yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_generated, 'time_seconds': round(total_time, 3), 'tokens_per_second': round(tokens_generated / total_time, 1) if total_time > 0 else 0, 'cache_stats': stats})}\n\n"
+        yield f"data: {json.dumps(done_payload)}\n\n"
 
     if stream:
         return Response(generate_stream(), mimetype="text/event-stream")
@@ -468,9 +510,30 @@ def completions():
             stop_token_ids=stop_token_ids,
         ):
             token_ids.append(int(token_id))
-        return jsonify(
-            {"completion": _decode_token_sequence(token_ids), "tokens_generated": len(token_ids)}
+        generated_text = _decode_token_sequence(token_ids)
+        completion = prompt + generated_text if echo_prompt else generated_text
+        stop_token_id = int(token_ids[-1]) if token_ids else None
+        stop_reason = (
+            "stop_token" if stop_token_id is not None and stop_token_id in stop_token_ids else "max_tokens"
         )
+        payload: dict[str, Any] = {
+            "completion": completion,
+            "tokens_generated": len(token_ids),
+            "stop_reason": stop_reason,
+            "stop_token_id": stop_token_id,
+        }
+        if debug_tokens:
+            payload.update(
+                {
+                    "prompt_token_ids": prompt_token_ids,
+                    "prompt_token_ids_hex": _token_ids_hex(prompt_token_ids),
+                    "generated_token_ids": token_ids,
+                    "generated_token_ids_hex": _token_ids_hex(token_ids),
+                    "tokenizer_source": tokenizer_source,
+                    "generated_text_only": generated_text,
+                }
+            )
+        return jsonify(payload)
 
 
 @app.route("/health", methods=["GET"])
@@ -485,6 +548,7 @@ def health():
             "status": "healthy" if model else "initializing",
             "model_loaded": model is not None,
             "tokenizer_loaded": tokenizer is not None,
+            "tokenizer_source": tokenizer_source,
             "stop_token_ids": stop_token_ids,
             "expert_cache_stats": stats,
         }

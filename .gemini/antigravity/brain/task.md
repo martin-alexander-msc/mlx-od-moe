@@ -1,15 +1,14 @@
 # Task
 
-Fix remaining Qwen3Next GGUF incoherent output after tokenizer, routing, and
-norm-shift fixes.
+Diagnose remaining Qwen3Next incoherent output with explicit token-level debug
+visibility and tokenizer hardening.
 
 Problem:
-- output remained semantically broken.
-- additional root cause identified: Qwen3Next linear-attention fusion
-  (`attn_qkv + attn_gate`) was concatenated as a flat append instead of
-  per-key-head `[q,k,v,z]` interleaving expected by
-  `Qwen3NextGatedDeltaNet.fix_query_key_value_ordering`.
+- output still appeared semantically broken after major tensor/mapping fixes.
+- debugging lacked raw token IDs and tokenizer source visibility.
+- potential tokenizer mismatch still possible due fallback handling.
 
 Requested outcome:
-- apply head-wise interleaving in qkvz fusion and add regression coverage for
-  ordering correctness.
+- add token-level diagnostics (`debug_tokens` with HEX IDs), add `echo_prompt`
+  control, expose tokenizer source, and harden GGUF tokenizer loading to prefer
+  exact embedded HF JSON parsing.
