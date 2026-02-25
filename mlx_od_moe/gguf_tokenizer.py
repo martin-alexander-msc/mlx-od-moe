@@ -14,6 +14,12 @@ import json
 import gguf
 
 
+QWEN2_PRETOKENIZE_REGEX = (
+    r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|"""
+    r""" ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
+)
+
+
 class GGUFTokenizer:
     """Minimal tokenizer wrapper with encode/decode callables."""
 
@@ -22,10 +28,14 @@ class GGUFTokenizer:
         encode_fn: Callable[[str], list[int]],
         decode_fn: Callable[[list[int]], str],
         source: str,
+        special_token_ids: Optional[dict[str, int]] = None,
+        stop_token_ids: Optional[list[int]] = None,
     ):
         self._encode = encode_fn
         self._decode = decode_fn
         self.source = source
+        self.special_token_ids = special_token_ids or {}
+        self.stop_token_ids = stop_token_ids or []
 
     def encode(self, text: str, return_tensors: Any = None) -> list[int]:
         del return_tensors
@@ -48,6 +58,8 @@ def _field_contents(reader: gguf.GGUFReader, key: str, default: Any = None) -> A
 def _load_hf_tokenizer_from_gguf_json(
     hf_json: str,
     source: str,
+    special_token_ids: Optional[dict[str, int]] = None,
+    stop_token_ids: Optional[list[int]] = None,
 ) -> Optional[GGUFTokenizer]:
     try:
         from tokenizers import Tokenizer
@@ -65,12 +77,20 @@ def _load_hf_tokenizer_from_gguf_json(
     def _decode(ids: list[int]) -> str:
         return tok.decode(ids)
 
-    return GGUFTokenizer(_encode, _decode, source)
+    return GGUFTokenizer(
+        _encode,
+        _decode,
+        source,
+        special_token_ids=special_token_ids,
+        stop_token_ids=stop_token_ids,
+    )
 
 
 def _load_gpt2_bpe_tokenizer_from_gguf(
     reader: gguf.GGUFReader,
     source: str,
+    special_token_ids: Optional[dict[str, int]] = None,
+    stop_token_ids: Optional[list[int]] = None,
 ) -> Optional[GGUFTokenizer]:
     model = _field_contents(reader, "tokenizer.ggml.model")
     if str(model).lower() != "gpt2":
@@ -83,6 +103,8 @@ def _load_gpt2_bpe_tokenizer_from_gguf(
 
     try:
         from tokenizers import Tokenizer
+        from tokenizers import AddedToken, Regex
+        from tokenizers import normalizers, pre_tokenizers
         from tokenizers.models import BPE
         from tokenizers.pre_tokenizers import ByteLevel
         from tokenizers.decoders import ByteLevel as ByteLevelDecoder
@@ -109,11 +131,48 @@ def _load_gpt2_bpe_tokenizer_from_gguf(
             continue
         parsed_merges.append((parts[0], parts[1]))
 
+    pre = _field_contents(reader, "tokenizer.ggml.pre", "")
+    add_prefix_space = bool(_field_contents(reader, "tokenizer.ggml.add_space_prefix", False))
+
     try:
         bpe = BPE(vocab=vocab, merges=parsed_merges, unk_token=None, fuse_unk=False)
         tokenizer = Tokenizer(bpe)
-        tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False, use_regex=True)
         tokenizer.decoder = ByteLevelDecoder()
+
+        # Qwen2/Qwen3 family uses a custom split + byte-level pretokenization.
+        if str(pre).lower() == "qwen2":
+            tokenizer.normalizer = normalizers.NFC()
+            tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+                [
+                    pre_tokenizers.Split(
+                        Regex(QWEN2_PRETOKENIZE_REGEX),
+                        behavior="isolated",
+                        invert=False,
+                    ),
+                    pre_tokenizers.ByteLevel(
+                        add_prefix_space=add_prefix_space,
+                        use_regex=False,
+                    ),
+                ]
+            )
+        else:
+            tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=add_prefix_space, use_regex=True)
+
+        token_types = _field_contents(reader, "tokenizer.ggml.token_type")
+        tokens_list = _field_contents(reader, "tokenizer.ggml.tokens")
+        if isinstance(token_types, list) and isinstance(tokens_list, list):
+            special_tokens: list[AddedToken] = []
+            for idx, typ in enumerate(token_types):
+                if int(typ) != int(gguf.TokenType.CONTROL):
+                    continue
+                if idx >= len(tokens_list):
+                    continue
+                tok = tokens_list[idx]
+                if not isinstance(tok, str):
+                    tok = str(tok)
+                special_tokens.append(AddedToken(tok, special=True))
+            if special_tokens:
+                tokenizer.add_special_tokens(special_tokens)
     except Exception:
         return None
 
@@ -123,7 +182,72 @@ def _load_gpt2_bpe_tokenizer_from_gguf(
     def _decode(ids: list[int]) -> str:
         return tokenizer.decode(ids)
 
-    return GGUFTokenizer(_encode, _decode, source)
+    return GGUFTokenizer(
+        _encode,
+        _decode,
+        source,
+        special_token_ids=special_token_ids,
+        stop_token_ids=stop_token_ids,
+    )
+
+
+def infer_gguf_special_token_ids(gguf_path: str) -> dict[str, Any]:
+    """Read special token IDs from GGUF tokenizer metadata."""
+    path = Path(gguf_path)
+    if not path.exists():
+        raise FileNotFoundError(f"GGUF file not found: {gguf_path}")
+
+    reader = gguf.GGUFReader(str(path))
+
+    eos_id = _field_contents(reader, "tokenizer.ggml.eos_token_id")
+    eot_id = _field_contents(reader, "tokenizer.ggml.eot_token_id")
+    eom_id = _field_contents(reader, "tokenizer.ggml.eom_token_id")
+    bos_id = _field_contents(reader, "tokenizer.ggml.bos_token_id")
+    pad_id = _field_contents(reader, "tokenizer.ggml.padding_token_id")
+    eos_ids = _field_contents(reader, "tokenizer.ggml.eos_token_ids", default=[])
+
+    def _to_int(v: Any) -> Optional[int]:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        return None
+
+    special: dict[str, int] = {}
+    for name, value in (
+        ("bos_token_id", bos_id),
+        ("eos_token_id", eos_id),
+        ("eot_token_id", eot_id),
+        ("eom_token_id", eom_id),
+        ("pad_token_id", pad_id),
+    ):
+        parsed = _to_int(value)
+        if parsed is not None and parsed >= 0:
+            special[name] = parsed
+
+    stop_candidates: list[int] = []
+    for key in ("eos_token_id", "eot_token_id", "eom_token_id"):
+        if key in special:
+            stop_candidates.append(special[key])
+
+    if isinstance(eos_ids, list):
+        for value in eos_ids:
+            parsed = _to_int(value)
+            if parsed is not None and parsed >= 0:
+                stop_candidates.append(parsed)
+
+    pad_token_id = special.get("pad_token_id")
+    stop_ids: list[int] = []
+    for tid in stop_candidates:
+        if pad_token_id is not None and tid == pad_token_id:
+            continue
+        if tid not in stop_ids:
+            stop_ids.append(tid)
+
+    return {
+        **special,
+        "stop_token_ids": stop_ids,
+    }
 
 
 def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
@@ -139,16 +263,28 @@ def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
         raise FileNotFoundError(f"GGUF file not found: {gguf_path}")
 
     reader = gguf.GGUFReader(str(path))
+    special_token_ids = infer_gguf_special_token_ids(gguf_path)
+    stop_token_ids = special_token_ids.get("stop_token_ids", [])
 
     hf_json = _field_contents(reader, "tokenizer.huggingface.json")
     if isinstance(hf_json, str) and hf_json.strip():
-        tok = _load_hf_tokenizer_from_gguf_json(hf_json, f"gguf:{gguf_path}:hf_json")
+        tok = _load_hf_tokenizer_from_gguf_json(
+            hf_json,
+            f"gguf:{gguf_path}:hf_json",
+            special_token_ids=special_token_ids,
+            stop_token_ids=stop_token_ids,
+        )
         if tok is not None:
             return tok
         # validate early for debugging when field exists but malformed
         json.loads(hf_json)
 
-    tok = _load_gpt2_bpe_tokenizer_from_gguf(reader, f"gguf:{gguf_path}:gpt2_bpe")
+    tok = _load_gpt2_bpe_tokenizer_from_gguf(
+        reader,
+        f"gguf:{gguf_path}:gpt2_bpe",
+        special_token_ids=special_token_ids,
+        stop_token_ids=stop_token_ids,
+    )
     if tok is not None:
         return tok
 
@@ -157,4 +293,3 @@ def load_tokenizer_from_gguf(gguf_path: str) -> GGUFTokenizer:
         "GGUF tokenizer metadata is unsupported for direct runtime tokenization. "
         f"model={model!r}. Provide --tokenizer explicitly."
     )
-

@@ -1,12 +1,13 @@
 # Task
 
-Fix missing tokenizer in GGUF-only runtime mode.
+Fix Qwen3 GGUF output quality after tokenizer autoload.
 
 Problem:
-- server generated token IDs but returned empty completion text when
-  `--tokenizer` was omitted.
-- `--gguf-experts` should be sufficient for inference setup.
+- tokenizer autoload made text non-empty, but responses were still garbled and
+  included control-token artifacts.
+- Qwen3 GGUF uses `tokenizer.ggml.pre=qwen2` and GGUF stop IDs that were not
+  fully respected in runtime generation.
 
 Requested outcome:
-- auto-load tokenizer from GGUF metadata so completions work without external
-  tokenizer files.
+- apply correct Qwen2-style pretokenization and stop generation on GGUF EOS/EOT
+  metadata so completions are coherent.

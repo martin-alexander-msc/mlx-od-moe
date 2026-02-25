@@ -230,9 +230,12 @@ class Qwen3NextODMoEModel(nn.Module):
         temperature: float = 0.6,
         top_p: float = 0.9,
         eos_token_id: Optional[int] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> Generator[int, None, None]:
         if eos_token_id is None:
             eos_token_id = self.config.eos_token_id
+        stop_ids = set(int(t) for t in (stop_token_ids or []))
+        stop_ids.add(int(eos_token_id))
 
         cache = self.make_cache()
         logits = self(input_ids, cache=cache)
@@ -265,7 +268,7 @@ class Qwen3NextODMoEModel(nn.Module):
 
             token_id = int(next_token.item())
             yield token_id
-            if token_id == eos_token_id:
+            if token_id in stop_ids:
                 break
 
             logits = self(next_token.reshape(1, 1), cache=cache)

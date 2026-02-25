@@ -91,6 +91,10 @@ uv run python3 -m mlx_od_moe.server \
 In GGUF expert mode, tokenizer metadata is auto-loaded from the GGUF file when
 `--tokenizer` is omitted.
 
+For Qwen3-family GGUF models, the runtime now applies Qwen2-style
+pre-tokenization rules and uses GGUF tokenizer stop IDs (EOS/EOT metadata) to
+terminate generation, avoiding control-token garbage in outputs.
+
 Important for Qwen3-Next models: if `base_model` was produced with an older
 converter version, re-run `--base-only`. Newer extraction includes required
 `ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.

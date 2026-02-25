@@ -16,7 +16,7 @@ import re
 from .model import KimiODMoEModel, ODMoEConfig
 from .qwen3_next_od_model import Qwen3NextODMoEModel, Qwen3NextODConfig
 from .gguf_expert_store import infer_gguf_moe_metadata
-from .gguf_tokenizer import load_tokenizer_from_gguf
+from .gguf_tokenizer import load_tokenizer_from_gguf, infer_gguf_special_token_ids
 from .weight_loader import (
     load_base_weight_items,
     infer_config_overrides_from_base_shapes,
@@ -30,6 +30,7 @@ from .weight_loader import (
 app = Flask(__name__)
 model: Optional[Any] = None
 tokenizer = None
+stop_token_ids: list[int] = []
 
 
 def _load_tokenizer(tokenizer_path: str):
@@ -160,7 +161,7 @@ def initialize_model(
     cache_size_gb: int = 48,
 ):
     """Initialize model with OD-MoE."""
-    global model
+    global model, stop_token_ids
 
     print("Initializing OD-MoE model...")
     if gguf_experts is None:
@@ -175,6 +176,7 @@ def initialize_model(
         base_shapes = inspect_base_weight_shapes(base_weights)
         overrides = infer_config_overrides_from_base_shapes(base_weights)
         gguf_meta = infer_gguf_moe_metadata(gguf_experts) if gguf_experts else {}
+        gguf_tok_meta = infer_gguf_special_token_ids(gguf_experts) if gguf_experts else {}
 
         if gguf_experts:
             for key in (
@@ -189,6 +191,8 @@ def initialize_model(
             ):
                 if key in gguf_meta:
                     overrides[key] = gguf_meta[key]
+            if "eos_token_id" in gguf_tok_meta:
+                overrides["eos_token_id"] = int(gguf_tok_meta["eos_token_id"])
         else:
             inferred_experts = infer_num_local_experts(expert_dir)
             if inferred_experts is not None:
@@ -227,6 +231,8 @@ def initialize_model(
         ):
             if key in gguf_meta:
                 q_overrides[key] = gguf_meta[key]
+        if "eos_token_id" in gguf_tok_meta:
+            q_overrides["eos_token_id"] = int(gguf_tok_meta["eos_token_id"])
 
         # Conservative defaults for Qwen3Next-Coder-Next family.
         q_overrides.setdefault("full_attention_interval", 4)
@@ -318,6 +324,14 @@ def initialize_model(
     elif gguf_experts:
         _load_gguf_tokenizer(gguf_experts)
 
+    if gguf_experts:
+        stop_token_ids = [int(t) for t in gguf_tok_meta.get("stop_token_ids", [])]
+    else:
+        stop_token_ids = []
+    if not stop_token_ids and model is not None and hasattr(model, "config"):
+        stop_token_ids = [int(model.config.eos_token_id)]
+    print(f"Resolved stop token IDs: {stop_token_ids}")
+
     print("Model initialized")
 
 
@@ -361,7 +375,13 @@ def completions():
     def generate_stream():
         nonlocal tokens_generated
 
-        for token_id in model.generate(input_ids, max_tokens, temperature, top_p):
+        for token_id in model.generate(
+            input_ids,
+            max_tokens,
+            temperature,
+            top_p,
+            stop_token_ids=stop_token_ids,
+        ):
             tokens_generated += 1
             token_text = _detokenize(token_id)
 
@@ -377,7 +397,13 @@ def completions():
         return Response(generate_stream(), mimetype="text/event-stream")
     else:
         tokens = []
-        for token_id in model.generate(input_ids, max_tokens, temperature, top_p):
+        for token_id in model.generate(
+            input_ids,
+            max_tokens,
+            temperature,
+            top_p,
+            stop_token_ids=stop_token_ids,
+        ):
             tokens.append(_detokenize(token_id))
         return jsonify(
             {"completion": "".join(tokens), "tokens_generated": len(tokens)}
@@ -396,6 +422,7 @@ def health():
             "status": "healthy" if model else "initializing",
             "model_loaded": model is not None,
             "tokenizer_loaded": tokenizer is not None,
+            "stop_token_ids": stop_token_ids,
             "expert_cache_stats": stats,
         }
     )

@@ -416,6 +416,7 @@ class KimiODMoEModel(nn.Module):
         temperature: float = 0.6,
         top_p: float = 0.9,
         eos_token_id: Optional[int] = None,
+        stop_token_ids: Optional[List[int]] = None,
         log_interval: int = 0,
     ) -> Generator[int, None, None]:
         """
@@ -434,6 +435,8 @@ class KimiODMoEModel(nn.Module):
         """
         if eos_token_id is None:
             eos_token_id = self.config.eos_token_id
+        stop_ids = set(int(t) for t in (stop_token_ids or []))
+        stop_ids.add(int(eos_token_id))
 
         cache = [KVCache() for _ in self.layers]
 
@@ -453,7 +456,7 @@ class KimiODMoEModel(nn.Module):
             token_id = next_token.item()
             yield token_id
 
-            if token_id == eos_token_id:
+            if int(token_id) in stop_ids:
                 break
 
             # Decode step: process just the new token with KV cache
