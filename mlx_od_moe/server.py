@@ -161,6 +161,20 @@ def _preprocess_qwen3next_source_tensors(source_dict: dict[str, Any]) -> dict[st
         processed.pop(key, None)
         processed.pop(gate_key, None)
 
+    # Qwen3Next GGUF norm tensors for attention/post-attention/q_norm/k_norm and
+    # final output_norm are stored around a zero-centered baseline. MLX runtime
+    # expects these RMSNorm-style weights shifted by +1.0.
+    norm_patterns = (
+        re.compile(r"blk\.\d+\.attn_norm\.weight$"),
+        re.compile(r"blk\.\d+\.post_attention_norm\.weight$"),
+        re.compile(r"blk\.\d+\.attn_q_norm\.weight$"),
+        re.compile(r"blk\.\d+\.attn_k_norm\.weight$"),
+    )
+    for key, tensor in list(processed.items()):
+        if key == "output_norm.weight" or any(p.fullmatch(key) for p in norm_patterns):
+            if hasattr(tensor, "ndim") and int(tensor.ndim) == 1:
+                processed[key] = tensor + 1.0
+
     return processed
 
 

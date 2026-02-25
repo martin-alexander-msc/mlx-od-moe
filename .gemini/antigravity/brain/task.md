@@ -1,13 +1,12 @@
 # Task
 
-Align Qwen3Next OD-MoE routing behavior with Qwen3 reference semantics.
+Fix remaining Qwen3Next GGUF incoherent output after routing changes.
 
 Problem:
-- tokenizer and stop-token fixes improved outputs but generations remained
-  incoherent.
-- MoE routing in `ODMoELayer` used logits-based top-k with always-on
-  renormalization, which diverged from Qwen3Next routing semantics.
+- output remained semantically broken after tokenizer and routing fixes.
+- root cause identified: Qwen3Next norm tensors need a `+1.0` sanitize step
+  during base-weight preprocessing, matching `mlx_lm` behavior.
 
 Requested outcome:
-- switch OD routing to precise probability-based top-k, make top-k
-  renormalization configurable via `norm_topk_prob`, and add guardrails/tests.
+- apply the missing norm shift in Qwen3Next preprocessing and add regression
+  coverage.

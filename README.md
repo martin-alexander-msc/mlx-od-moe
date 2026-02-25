@@ -95,6 +95,10 @@ For Qwen3-family GGUF models, the runtime now applies Qwen2-style
 pre-tokenization rules and uses GGUF tokenizer stop IDs (EOS/EOT metadata) to
 terminate generation, avoiding control-token garbage in outputs.
 
+For Qwen3-Next base weights, server preprocessing also applies the required
+RMSNorm-style `+1.0` shift on attention/post-attention/q_norm/k_norm and final
+`output_norm` tensors (matching `mlx_lm` sanitize behavior).
+
 Important for Qwen3-Next models: if `base_model` was produced with an older
 converter version, re-run `--base-only`. Newer extraction includes required
 `ssm_*` and `*_shexp` tensors for hybrid Qwen3-Next blocks.
