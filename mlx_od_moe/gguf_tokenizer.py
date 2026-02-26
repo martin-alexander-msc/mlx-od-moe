@@ -316,6 +316,17 @@ def infer_gguf_special_token_ids(gguf_path: str) -> dict[str, Any]:
         if tid not in stop_ids:
             stop_ids.append(tid)
 
+    # Also stop on <|endoftext|> when present. Many Qwen/GPT2-BPE GGUFs use it as
+    # an end marker.
+    tokens = _field_contents(reader, "tokenizer.ggml.tokens")
+    if isinstance(tokens, list):
+        try:
+            eot = tokens.index("<|endoftext|>")
+            if eot not in stop_ids:
+                stop_ids.append(int(eot))
+        except ValueError:
+            pass
+
     return {
         **special,
         "stop_token_ids": stop_ids,
