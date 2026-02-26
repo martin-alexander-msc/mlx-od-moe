@@ -290,5 +290,31 @@ class Qwen3NextODMoEModel(nn.Module):
             if token_id in stop_ids:
                 break
 
-            logits = self(next_token.reshape(1, 1), cache=cache)
-            mx.eval(logits)
+            # Compare incremental cached step vs full forward on the entire
+            # sequence (debug only). If these diverge, the cache update path is
+            # broken.
+            try:
+                import numpy as _np
+
+                # cached incremental
+                logits_inc = self(next_token.reshape(1, 1), cache=cache)
+                mx.eval(logits_inc)
+
+                # full recompute
+                full_ids = mx.concatenate([input_ids, next_token.reshape(1, 1)], axis=1)
+                logits_full = self(full_ids, cache=None)
+                mx.eval(logits_full)
+
+                # compare last-position logits
+                li = _np.array(logits_inc[0, -1]).astype(_np.float32)
+                lf = _np.array(logits_full[0, -1]).astype(_np.float32)
+                diff = float(_np.max(_np.abs(li - lf)))
+                print(f"[debug] step{step+1} inc_vs_full max_abs_diff={diff}", flush=True)
+
+                logits = logits_inc
+                # update input_ids for next comparison
+                input_ids = full_ids
+            except Exception as _e:
+                print(f"[debug] inc_vs_full failed: {_e}", flush=True)
+                logits = self(next_token.reshape(1, 1), cache=cache)
+                mx.eval(logits)
