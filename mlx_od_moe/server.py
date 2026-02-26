@@ -458,9 +458,10 @@ def completions():
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    # Qwen chat-style models expect the ChatML-like wrapper. Without it, the
-    # model tends to emit control tokens (<|im_start|>/<|im_end|>) instead of
-    # natural text. If the user didn't supply a template already, add one.
+    # Qwen chat-style models expect a specific chat template. GGUF may embed a
+    # Jinja template in tokenizer.chat_template; we don't evaluate it here yet.
+    # As a pragmatic default, apply a minimal ChatML wrapper only if the user
+    # didn't provide one already.
     formatted_prompt = prompt
     if "<|im_start|>" not in formatted_prompt and "<|im_end|>" not in formatted_prompt:
         formatted_prompt = (
