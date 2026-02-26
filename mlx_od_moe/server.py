@@ -458,15 +458,36 @@ def completions():
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    # Qwen chat-style models expect a specific chat template. GGUF may embed a
-    # Jinja template in tokenizer.chat_template; we don't evaluate it here yet.
-    # As a pragmatic default, apply a minimal ChatML wrapper only if the user
-    # didn't provide one already.
+    # Prefer the GGUF-embedded chat template when present.
     formatted_prompt = prompt
     if "<|im_start|>" not in formatted_prompt and "<|im_end|>" not in formatted_prompt:
-        formatted_prompt = (
-            "<|im_start|>user\n" + formatted_prompt + "<|im_end|>\n<|im_start|>assistant\n"
-        )
+        try:
+            import gguf
+            from jinja2 import Environment
+
+            r = gguf.GGUFReader(str(model_gguf_experts_path))
+            field = r.fields.get("tokenizer.chat_template")
+            tpl = field.contents() if field is not None else None
+            if isinstance(tpl, bytes):
+                tpl = tpl.decode("utf-8", "replace")
+
+            if isinstance(tpl, str) and tpl.strip():
+                env = Environment(trim_blocks=True, lstrip_blocks=True)
+                t = env.from_string(tpl)
+                formatted_prompt = t.render(
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[],
+                    add_generation_prompt=True,
+                )
+            else:
+                # Fallback: minimal ChatML wrapper.
+                formatted_prompt = (
+                    "<|im_start|>user\n" + formatted_prompt + "<|im_end|>\n<|im_start|>assistant\n"
+                )
+        except Exception:
+            formatted_prompt = (
+                "<|im_start|>user\n" + formatted_prompt + "<|im_end|>\n<|im_start|>assistant\n"
+            )
 
     prompt_token_ids = _encode_to_token_ids(formatted_prompt)
     input_ids = mx.array([prompt_token_ids])
