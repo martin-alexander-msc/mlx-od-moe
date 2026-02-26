@@ -458,7 +458,16 @@ def completions():
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    prompt_token_ids = _encode_to_token_ids(prompt)
+    # Qwen chat-style models expect the ChatML-like wrapper. Without it, the
+    # model tends to emit control tokens (<|im_start|>/<|im_end|>) instead of
+    # natural text. If the user didn't supply a template already, add one.
+    formatted_prompt = prompt
+    if "<|im_start|>" not in formatted_prompt and "<|im_end|>" not in formatted_prompt:
+        formatted_prompt = (
+            "<|im_start|>user\n" + formatted_prompt + "<|im_end|>\n<|im_start|>assistant\n"
+        )
+
+    prompt_token_ids = _encode_to_token_ids(formatted_prompt)
     input_ids = mx.array([prompt_token_ids])
 
     start_time = time.time()
@@ -513,6 +522,7 @@ def completions():
         if debug_tokens:
             done_payload.update(
                 {
+                    "prompt": formatted_prompt,
                     "prompt_token_ids": prompt_token_ids,
                     "prompt_token_ids_hex": _token_ids_hex(prompt_token_ids),
                     "generated_token_ids": [int(t) for t in generated_ids],
@@ -536,7 +546,7 @@ def completions():
         ):
             token_ids.append(int(token_id))
         generated_text = _decode_token_sequence(token_ids)
-        completion = prompt + generated_text if echo_prompt else generated_text
+        completion = formatted_prompt + generated_text if echo_prompt else generated_text
         stop_token_id = int(token_ids[-1]) if token_ids else None
         stop_reason = (
             "stop_token" if stop_token_id is not None and stop_token_id in stop_token_ids else "max_tokens"
@@ -550,6 +560,7 @@ def completions():
         if debug_tokens:
             payload.update(
                 {
+                    "prompt": formatted_prompt,
                     "prompt_token_ids": prompt_token_ids,
                     "prompt_token_ids_hex": _token_ids_hex(prompt_token_ids),
                     "generated_token_ids": token_ids,
