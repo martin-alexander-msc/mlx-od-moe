@@ -242,8 +242,22 @@ class Qwen3NextODMoEModel(nn.Module):
         logits = self(input_ids, cache=cache)
         mx.eval(logits)
 
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             next_token_logits = logits[:, -1, :]
+
+            # Debug: show top-5 tokens at the first generation step.
+            if step == 0:
+                try:
+                    import numpy as _np
+
+                    topk = 5
+                    arr = _np.array(next_token_logits[0]).astype(_np.float32)
+                    idx = arr.argsort()[-topk:][::-1].tolist()
+                    vals = [float(arr[i]) for i in idx]
+                    print(f"[debug] step0 top{topk} token_ids={idx} logits={vals}")
+                except Exception as _e:
+                    print(f"[debug] step0 topk failed: {_e}")
+
             if temperature == 0:
                 next_token = mx.argmax(next_token_logits, axis=-1)
             else:
