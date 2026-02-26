@@ -254,9 +254,13 @@ class Qwen3NextODMoEModel(nn.Module):
                     arr = _np.array(next_token_logits[0]).astype(_np.float32)
                     idx = arr.argsort()[-topk:][::-1].tolist()
                     vals = [float(arr[i]) for i in idx]
-                    print(f"[debug] step0 top{topk} token_ids={idx} logits={vals}")
+                    mx.eval(next_token_logits)
+                    print(
+                        f"[debug] step0 top{topk} token_ids={idx} logits={vals}",
+                        flush=True,
+                    )
                 except Exception as _e:
-                    print(f"[debug] step0 topk failed: {_e}")
+                    print(f"[debug] step0 topk failed: {_e}", flush=True)
 
             if temperature == 0:
                 next_token = mx.argmax(next_token_logits, axis=-1)
