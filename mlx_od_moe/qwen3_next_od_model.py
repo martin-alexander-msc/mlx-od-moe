@@ -307,7 +307,14 @@ class Qwen3NextODMoEModel(nn.Module):
                     li = _np.array(logits[0, -1]).astype(_np.float32)
                     lf = _np.array(logits_full[0, -1]).astype(_np.float32)
                     diff = float(_np.max(_np.abs(li - lf)))
+
+                    # Also log which tokens full-recompute would prefer.
+                    topk = 5
+                    idx = lf.argsort()[-topk:][::-1].tolist()
+                    vals = [float(lf[i]) for i in idx]
+
                     print(f"[debug] step1 inc_vs_full max_abs_diff={diff}", flush=True)
+                    print(f"[debug] step1 FULL top{topk} token_ids={idx} logits={vals}", flush=True)
 
                     # keep growing full_ids for later steps (prompt + generated)
                     input_ids = full_ids
