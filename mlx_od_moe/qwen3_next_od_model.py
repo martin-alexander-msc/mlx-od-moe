@@ -245,8 +245,8 @@ class Qwen3NextODMoEModel(nn.Module):
         for step in range(max_new_tokens):
             next_token_logits = logits[:, -1, :]
 
-            # Debug: show top-5 tokens at the first generation step.
-            if step == 0:
+            # Debug: show top-5 tokens at the first couple generation steps.
+            if step in (0, 1):
                 try:
                     import numpy as _np
 
@@ -256,7 +256,7 @@ class Qwen3NextODMoEModel(nn.Module):
                     vals = [float(arr[i]) for i in idx]
                     mx.eval(next_token_logits)
                     print(
-                        f"[debug] step0 top{topk} token_ids={idx} logits={vals}",
+                        f"[debug] step{step} top{topk} token_ids={idx} logits={vals}",
                         flush=True,
                     )
                 except Exception as _e:
